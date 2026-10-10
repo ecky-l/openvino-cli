@@ -6,15 +6,7 @@
 #                           message, process knobs in the environment.
 #   ovcli run ...          one-shot; self-configures from file/flags/env, reads one
 #                           request (base64 input for now), writes the response, exits.
-#
-# Design notes:
-#   * Dependency-free at P0 (only RapidJSON + GTest) so it builds/links clean now.
-#   * No fully static build: GPU/NPU device plugins dlopen their .so at runtime, so
-#     the engine links the INSTALLED dynamic runtime (find_package(OpenVINOGenAI))
-#     behind OVCLI_BUILD_OVGENAI, defaulting OFF (the P1 seam).
-#   * No git submodules for deps: use the package manager.
-
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.28)
 
 project(ovcli VERSION 0.1.0 LANGUAGES CXX)
 
@@ -41,17 +33,23 @@ if(NOT RapidJSON_FOUND)
   message(STATUS "openvino-cli: no installed RapidJSON config package; using bundled headers-only fallback.")
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/FindRapidJSON.cmake")
 endif()
+
+# Boost.program_options for the shared load-model CLI front-end. Prefer the
+# static variant (b2 --layout=system --link=static install, packaged by
+# distro as boost-static); setting Boost_USE_STATIC_LIBS=ON selects the .a
+# variants when the .so ones would otherwise be chosen. Boost::program_options
+# pulls in Boost::container + Boost::headers through the config file, so we
+# only need to name program_options here.
+set(Boost_USE_STATIC_LIBS ON CACHE BOOL "Prefer static boost libraries" FORCE)
+find_package(Boost 1.90 CONFIG REQUIRED COMPONENTS program_options)
+
 option(OVCLI_BUILD_TESTS  "Build the GoogleTest suite (worker/protocol/config)" ON)
 
-find_package(OpenVINO COMPONENTS Runtime CONFIG HINTS "${OPENVINO_CONFIG}")
-if(NOT OpenVINO_FOUND)
-    message(FATAL_ERROR "Could not find OpenVINO. Set OPENVINO_CONFIG to the directory containing OpenVINOConfig.cmake")
-endif()
+find_package(OpenVINO COMPONENTS Runtime CONFIG REQUIRED)
+message(STATUS "OpenVINO: ${OpenVINO_VERSION} (${OpenVINO_DIR})")
 
-find_package(OpenVINOGenAI CONFIG HINTS ${OPENVINO_GENAI_CONFIG})
-if(NOT OpenVINOGenAI_FOUND)
-    message(FATAL_ERROR "Could not find OpenVINOGenAI (required by LLM/embeddings/rerank/image_gen). Set OPENVINO_GENAI_CONFIG to the directory that contains OpenVINOGenAIConfig.cmake")
-endif()
+find_package(OpenVINOGenAI CONFIG REQUIRED)
+message(STATUS "OpenVINO.GenAI: ${OpenVINOGenAI_VERSION} (${OpenVINOGenAI_DIR})")
 
 # Generated constants header consumed by ovcli_core; build output under
 # src/generated/ (gitignored, regenerated on every configure).
@@ -74,6 +72,7 @@ target_include_directories(ovcli_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src/generated"
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>")
 target_link_libraries(ovcli_core PUBLIC RapidJSON)
+target_link_libraries(ovcli_core PUBLIC Boost::program_options)
 target_link_libraries(ovcli_core PUBLIC openvino::genai)
 target_compile_features(ovcli_core PUBLIC cxx_std_20)
 
@@ -102,8 +101,10 @@ if(OVCLI_BUILD_TESTS)
   target_compile_definitions(ovcli_tests PRIVATE
     OVCLI_WORKER_BIN="${CMAKE_CURRENT_BINARY_DIR}/ovcli")
 
-  add_test(NAME ovcli_tests COMMAND ovcli_tests)
-  set_tests_properties(ovcli_tests PROPERTIES
-    TIMEOUT 120
-    ENVIRONMENT "OPENARC_WORKER_LOGFILE_STUB=/tmp/ovcli-integration-worker.log")
+  include(GoogleTest)
+  gtest_discover_tests(ovcli_tests
+    DISCOVERY_MODE POST_BUILD
+    PROPERTIES
+      TIMEOUT 120
+      ENVIRONMENT "OPENARC_WORKER_LOGFILE_STUB=/tmp/ovcli-integration-worker.log")
 endif()
