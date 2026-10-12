@@ -94,10 +94,8 @@ po::options_description ModelLoadConfig::loadOptionsDesc() {
     ("draft-model", po::value<std::string>(),
         "Draft model dir for speculative decoding (no short: prefix-conflicts --device)")
     ("draft-device", po::value<std::string>(),
-        "Device for the draft model (default CPU; empty clears it; no short: --device conflict)")
+     "Device for the draft model (default CPU; empty clears it; no short: --device conflict)");
     // --- free-form JSON blob (authored;  carried verbatim) ---
-    ("config-blocks,b", po::value<std::string>(),
-        "Per-request default blocks (sampler_config, ...) as a JSON object");
   return s;
 }
 

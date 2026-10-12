@@ -244,7 +244,6 @@ TEST(jsonRoundTrip, fullConfig) {
       "--tool-call-parser", "qwen35",
       "--kv-cache-precision", "bf16",
       "--max-num-seqs", "2",
-      "--config-blocks",    "{\"sampler_config\":{\"temperature\":0.5}}",
   };
   // Each sibling config parses the same arg list, reading only its own section.
   auto load  = parseModelLoadConfig(args);
