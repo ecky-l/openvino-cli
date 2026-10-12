@@ -82,7 +82,8 @@ std::optional<bool> readOptionalBool(rapidjson::Value& v, const char* name) {
 // other classes own).
 po::options_description ModelSchedulerConfig::schedulerOptionsDesc() {
   po::options_description s(
-      "Scheduler Options (KV-cache / batching knobs the pipeline is built with; nullopt = engine default)");
+      "Scheduler Options (KV-cache / batching knobs the pipeline is built with; nullopt = engine default)",
+      kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
     ("max-num-batched-tokens", po::value<std::string>(),
         "Max tokens in a single batch step (SchedulerConfig default: 256)")

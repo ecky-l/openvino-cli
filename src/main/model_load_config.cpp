@@ -78,7 +78,8 @@ void finalize(ModelLoadConfig& cfg) {
 // + scheduler sections the other classes own).
 po::options_description ModelLoadConfig::loadOptionsDesc() {
   po::options_description s(
-      "Model load parameters (applied at model load time; shared by worker / run / show-config)");
+      "Model load parameters (applied at model load time; shared by worker / run / show-config)",
+      kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
     // --- required ---
     ("model,m", po::value<std::string>(),

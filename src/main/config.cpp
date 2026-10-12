@@ -279,7 +279,7 @@ std::string showConfigJson(const ModelLoadConfig& loadConfig,
 // parameters" section, then the "Scheduler Options" section, then the "Model
 // request parameters" section.
 std::string combinedConfigUsage() {
-  po::options_description desc;   // root, untitled (carries the --help switch)
+  po::options_description desc("", kHelpLineLength, kHelpMinDescriptionLength);   // root, untitled (carries the --help switch)
   desc.add(ModelLoadConfig::loadOptionsDesc());
   desc.add(ModelRuntimeConfig::runtimeOptionsDesc());
   desc.add(ModelSchedulerConfig::schedulerOptionsDesc());

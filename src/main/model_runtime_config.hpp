@@ -89,7 +89,7 @@ struct ModelRuntimeConfig {
   std::optional<std::string> inference_precision_hint;    // INFERENCE_PRECISION_HINT   : inference element type, e.g. f16 / f32 / bf16
   std::optional<std::size_t> key_cache_group_size;        // KEY_CACHE_GROUP_SIZE       : key-cache sub-channel quant group size; 0 = whole channel
   std::optional<std::string> key_cache_precision;         // KEY_CACHE_PRECISION        : key-cache element type (u4 / i8 / u8 / f16 / bf16 / f32)
-  std::optional<std::string> kv_cache_precision;          // KV_CACHE_PRECISION         : umbrella KV-cache element type (bf16 / f16 / f32 / ...)
+  std::optional<std::string> kv_cache_precision;          // KV_CACHE_PRECISION         : umbrella: sets key+value at once; valid both sides u4/u8/f16/bf16/f32 (default u8 x86_64/ARM64 else f16)
   std::optional<std::string> log_level;                   // LOG_LEVEL                  : LOG_NONE / LOG_ERROR / LOG_WARNING / LOG_INFO / LOG_DEBUG / LOG_TRACE
   std::optional<std::string> model_priority;              // MODEL_PRIORITY             : LOW / MEDIUM (default) / HIGH / DEFAULT
   std::optional<std::size_t> num_streams;                 // NUM_STREAMS                : executor streams (logical partitions)

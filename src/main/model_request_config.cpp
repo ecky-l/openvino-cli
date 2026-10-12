@@ -107,7 +107,8 @@ void readDefaultSize(rapidjson::Document& doc, const char* key,
 // alongside the load section the other class owns).
 po::options_description ModelRequestConfig::requestOptionsDesc() {
   po::options_description s(
-      "Model request parameters (worker: per-request defaults; run: the one request)");
+      "Model request parameters (worker: per-request defaults; run: the one request)",
+      kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
     ("num-assistant-tokens,n", po::value<std::string>(),
         "Draft tokens per speculative step — per-request default; protocol can override")

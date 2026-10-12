@@ -189,7 +189,8 @@ void readOptDouble(rapidjson::Value& v, const char* name, std::optional<double>&
 // ---------------------------------------------------------------------------
 po::options_description ModelRuntimeConfig::runtimeOptionsDesc() {
   po::options_description s(
-      "Runtime config options (OpenVINO Runtime properties; empty/default -- leave the engine default)");
+      "Runtime config options (OpenVINO Runtime properties; empty/default -- leave the engine default)",
+      kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
     ("activations-scale-factor", po::value<std::string>(),
         "Scales down activations to guard against overflow when the inference precision is f16 (a float factor)")
@@ -226,7 +227,10 @@ po::options_description ModelRuntimeConfig::runtimeOptionsDesc() {
     ("key-cache-precision", po::value<std::string>(),
         "Element type for KV-cache keys, overriding the umbrella KV_CACHE_PRECISION for the key side (u4 / i8 / u8 / f16 / bf16 / f32)")
     ("kv-cache-precision", po::value<std::string>(),
-        "Umbrella element type for KV-cache compression, e.g. bf16 / f16 / f32 -- overridable per side by --key-cache-precision / --value-cache-precision")
+        "Umbrella KV-cache precision: sets BOTH key and value at once (unless a per-side value is given) -- "
+        "valid on both sides: u4 / u8 / f16 / bf16 / f32; default u8 on x86_64/ARM64, f16 otherwise "
+        "(i8 is a key-side-only value, not a valid umbrella).  Overridable per side by "
+        "--key-cache-precision / --value-cache-precision")
     ("log-level", po::value<std::string>(),
         "Logging level: LOG_NONE / LOG_ERROR / LOG_WARNING / LOG_INFO / LOG_DEBUG / LOG_TRACE")
     ("model-priority", po::value<std::string>(),

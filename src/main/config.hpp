@@ -48,6 +48,19 @@ struct ModelSchedulerConfig;
 struct ModelRequestConfig;
 struct ModelRuntimeConfig;
 
+// --- Help-column geometry, single-sourced here so every section's `--help`
+//     agrees.  boost::program_options constructs options_description with
+//     (caption, line_length = 80, min_description_length = 40);  with only a
+//     caption that default is used,  and -- given the long runtime flags such as
+//     --performance-hint-num-requests --  an 80 / 40 default cramps the
+//     description (right) column down to ~40 characters.  These two wider knobs
+//     are passed to every *OptionsDesc() (and the combined root):  a wider
+//     overall line length gives the description column real room,  while the
+//     flag-name (first) column is auto-sized by boost to its longest entry and
+//     is left untouched.
+inline constexpr unsigned kHelpLineLength           = 120;  // total help line width
+inline constexpr unsigned kHelpMinDescriptionLength = 56;   // the description column floor
+
 // Thrown when the operator's config arguments are missing, unknown, or invalid.
 // Its message points at the offending flag; callers print it to stderr and exit
 // non-zero -- just enough to be actionable. Defined in config.cpp; both
@@ -108,11 +121,6 @@ std::string showConfigJson(const ModelLoadConfig& loadConfig,
 // request sections (each exactly as its owning class renders it), so `ovcli
 // <cmd> --help` shows all four parameter groups.  Owns no parameters -- it only
 // composes the three-plus-one.
-
-// The combined --help view: renders the load, then scheduler, then request
-// sections (each exactly as its owning class renders it), so `ovcli <cmd>
-// --help` shows all three parameter groups. Owns no parameters -- it only
-// composes the three.
 std::string combinedConfigUsage();
 
 }  // namespace config
