@@ -1,7 +1,7 @@
 #!/bin/bash
 #
 # Evaluating $(./setupenv.sh) in the current shell exports the three
-# variables ovcli's CMake and the test harness expect:
+# variables ovgenai's CMake and the test harness expect:
 #   OpenVINO_DIR        = <root of openvino install>/runtime/cmake
 #   OpenVINOGenAI_DIR   = <root of openvino.genai install>/runtime/cmake
 #   LD_LIBRARY_PATH     = the runtime lib dirs (prepended, not overwriting)

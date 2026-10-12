@@ -1,7 +1,7 @@
 // --- Per-request generation config ------------------------------------------
 //
-// For ovcli run:  populated from CLI flags (parseModelRequestConfig).
-// For ovcli worker (future):  populated from a protocol command per request.
+// For ovgenai run:  populated from CLI flags (parseModelRequestConfig).
+// For ovgenai worker (future):  populated from a protocol command per request.
 // Maps the per-request generation knobs; the JSON round-trip uses snake_case
 // keys (see modelRequestConfigFromJson below), so the wire form is stable.
 //
@@ -11,8 +11,8 @@
 // request omits it);  the other seven are std::optional,  where nullopt means
 // "not in this request" and then falls back to the model-load default or,
 // failing that,  the engine default.
-#ifndef OVCLI_MODEL_REQUEST_CONFIG_HPP
-#define OVCLI_MODEL_REQUEST_CONFIG_HPP
+#ifndef OVGENAI_MODEL_REQUEST_CONFIG_HPP
+#define OVGENAI_MODEL_REQUEST_CONFIG_HPP
 
 #include <cstddef>
 #include <optional>
@@ -22,7 +22,7 @@
 #include <boost/program_options.hpp>   // for po::options_description in requestOptionsDesc
 #include "config.hpp"  // ConfigError + the parse helpers both sections share
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 
 struct ModelRequestConfig {
@@ -59,7 +59,7 @@ struct ModelRequestConfig {
   static std::string usage();
 };
 
-// Parses the per-request generation config (for `ovcli run`) via boost over the
+// Parses the per-request generation config (for `ovgenai run`) via boost over the
 // full argv (its section plus the load + runtime + scheduler sections the other
 // classes own, so the flags a caller also passes are "known", not "unknown
 // option"); only the generation-config fields are read. Unknown/missing flags
@@ -74,6 +74,6 @@ ModelRequestConfig modelRequestConfigFromJson(const std::string& json);
 std::string modelRequestConfigToJson(const ModelRequestConfig& config);
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai
 
-#endif  // OVCLI_MODEL_REQUEST_CONFIG_HPP
+#endif  // OVGENAI_MODEL_REQUEST_CONFIG_HPP

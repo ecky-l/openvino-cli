@@ -1,4 +1,4 @@
-// ovcli's scheduler config: the "Scheduler Options" boost section this class
+// ovgenai's scheduler config: the "Scheduler Options" boost section this class
 // owns (schedulerOptionsDesc / usage), its parser (validated against the load /
 // request sections the siblings own so their flags are "known", reading only the
 // 10 scheduler fields), and its JSON round-trip.  The engine-config layer's
@@ -31,7 +31,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 namespace {
 
@@ -186,7 +186,7 @@ ModelSchedulerConfig parseModelSchedulerConfig(const std::vector<std::string>& a
   if (pp.positionalCount > 1) {
     throw ConfigError("only one positional (the model path) may be given; found "
                        + std::to_string(pp.positionalCount)
-                       + ". ovcli loads exactly one model -- set it with --model");
+                       + ". ovgenai loads exactly one model -- set it with --model");
   }
   std::vector<std::string> cleanArgs = pp.args;
   cleanArgs.erase(std::remove(cleanArgs.begin(), cleanArgs.end(), std::string("-")),
@@ -291,7 +291,7 @@ ModelSchedulerConfig modelSchedulerConfigFromJson(const std::string& json) {
       sc.use_cache_eviction       = readOptionalBool(kv->value, "use_cache_eviction");
     else if (k == "use_sparse_attention")
       sc.use_sparse_attention     = readOptionalBool(kv->value, "use_sparse_attention");
-    // Unknown keys are silently ignored (ovcli decoupling from the wider schema).
+    // Unknown keys are silently ignored (ovgenai decoupling from the wider schema).
   }
   return sc;
 }
@@ -339,4 +339,4 @@ std::string modelSchedulerConfigToJson(const ModelSchedulerConfig& c) {
 }
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai

@@ -1,4 +1,4 @@
-// Shared config *plumbing* (namespace ovcli::config) that none of the three
+// Shared config *plumbing* (namespace ovgenai::config) that none of the three
 // concrete configs (model-load, scheduler, per-request) owns on its own: the
 // ConfigError type, the argv / number / JSON-object coercions all parsers share,
 // showConfigJson (the composite that names all three configs' JSON --
@@ -31,7 +31,7 @@
 
 namespace po = boost::program_options;
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 namespace {
 
@@ -168,7 +168,7 @@ long long parseSize(const std::string& s, const char* flag) {
 }
 
 // --- A tiny positional-friendly preprocessor for boost ----------------------
-// ovcli's UX has a single leading positional stand in for --model, but
+// ovgenai's UX has a single leading positional stand in for --model, but
 // boost 1.90's positional_options_description rejects "the option cannot be
 // specified more than once" when both are given. So before handing args to
 // boost we:
@@ -212,7 +212,7 @@ PreProcessed preProcess(const std::vector<std::string>& args) {
   return pp;
 }
 
-// Turn a boost parser error into a ConfigError in ovcli's own vocabulary
+// Turn a boost parser error into a ConfigError in ovgenai's own vocabulary
 // (so tests / callers see "unknown option" / "requires a value" consistently).
 ConfigError rephraseBoost(const po::error& e) {
   const std::string msg = e.what();
@@ -271,7 +271,7 @@ std::string showConfigJson(const ModelLoadConfig& loadConfig,
 //     ownership) -------------------------------------------------------------
 //
 // Render the three option sections side by side, each exactly as the class that
-// OWNS it renders it, so `ovcli <cmd> --help` shows all three parameter groups
+// OWNS it renders it, so `ovgenai <cmd> --help` shows all three parameter groups
 // under their own headers. This mirrors the former makeLoadOptions: the --help /
 // -h switch is registered on the untitled root section (added after the three
 // named sub-descriptions) so a stray --help in a direct test still parses clean;
@@ -291,4 +291,4 @@ std::string combinedConfigUsage() {
 }
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai

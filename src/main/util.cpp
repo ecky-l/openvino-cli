@@ -4,7 +4,7 @@
 #include <cctype>
 #include <cstdlib>
 
-namespace ovcli {
+namespace ovgenai {
 
 std::string env_or(const std::string& key, const std::string& def,
                    bool treat_empty_as_missing) {
@@ -99,4 +99,4 @@ std::string base64_decode(const std::string& in) {
   return out;
 }
 
-}  // namespace ovcli
+}  // namespace ovgenai

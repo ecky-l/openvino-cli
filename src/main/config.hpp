@@ -1,4 +1,4 @@
-// Shared config *plumbing* for ovcli -- the pieces that BOTH the model-load
+// Shared config *plumbing* for ovgenai -- the pieces that BOTH the model-load
 // config and the per-request config depend on, declared once here and defined
 // in config.cpp.
 //
@@ -18,11 +18,11 @@
 //   * combinedConfigUsage      -- renders the combined --help view: each section
 //     exactly as the class that owns it renders it, so the help text and the
 //     parser cannot drift.
-// (The three fields ovcli deliberately does not expose -- context_window /
+// (The three fields ovgenai deliberately does not expose -- context_window /
 // worker_max_respawns / worker_line_limit -- are documented at the top of
 // model_load_config.hpp, beside the load flag map they would have sat in.)
-#ifndef OVCLI_CONFIG_HPP
-#define OVCLI_CONFIG_HPP
+#ifndef OVGENAI_CONFIG_HPP
+#define OVGENAI_CONFIG_HPP
 
 #include <cstddef>
 #include <stdexcept>
@@ -35,7 +35,7 @@
 
 namespace po = boost::program_options;
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 
 // The three concrete config structs; their full definitions live in
@@ -71,7 +71,7 @@ class ConfigError : public std::runtime_error {
 };
 
 // --- Parse helpers shared by BOTH the model-load and the per-request parsers --
-// Declared here (in ovcli::config) and defined in config.cpp, so both
+// Declared here (in ovgenai::config) and defined in config.cpp, so both
 // model_load_config.cpp and model_request_config.cpp can link to them; each
 // also carries its own module-local helpers for the flags only it parses.
 
@@ -104,7 +104,7 @@ struct PreProcessed {
 
 PreProcessed preProcess(const std::vector<std::string>& args);
 
-// Turn a boost parser error into a ConfigError in ovcli's own vocabulary
+// Turn a boost parser error into a ConfigError in ovgenai's own vocabulary
 // ("unknown option" / "requires a value") so callers see consistent text.
 ConfigError rephraseBoost(const po::error& e);
 
@@ -118,12 +118,12 @@ std::string showConfigJson(const ModelLoadConfig& loadConfig,
                            const ModelRequestConfig& requestConfig);
 
 // The combined --help view: renders the load, then runtime, then scheduler, then
-// request sections (each exactly as its owning class renders it), so `ovcli
+// request sections (each exactly as its owning class renders it), so `ovgenai
 // <cmd> --help` shows all four parameter groups.  Owns no parameters -- it only
 // composes the three-plus-one.
 std::string combinedConfigUsage();
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai
 
-#endif  // OVCLI_CONFIG_HPP
+#endif  // OVGENAI_CONFIG_HPP

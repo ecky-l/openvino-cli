@@ -1,14 +1,14 @@
-# ovcli -- self-contained C++ drop-in for OpenArc's Python inference worker.
+# ovgenai -- frontend cli tool for openvino/openvino.genai interference
 #
 # One binary, two front-ends sharing an engine core (see docs/design.md):
-#   ovcli worker <model>   long-lived line-JSON protocol (stdin/out); the drop-in
+#   ovgenai worker <model>   long-lived line-JSON protocol (stdin/out); the drop-in
 #                           the supervisor respawns; config arrives in the LOAD
 #                           message, process knobs in the environment.
-#   ovcli run ...          one-shot; self-configures from file/flags/env, reads one
+#   ovgenai run ...          one-shot; self-configures from file/flags/env, reads one
 #                           request (base64 input for now), writes the response, exits.
 cmake_minimum_required(VERSION 3.28)
 
-project(ovcli VERSION 0.1.0 LANGUAGES CXX)
+project(ovgenai VERSION 0.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,7 +16,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
-# Binaries (ovcli + tests) land directly under <build>/ so the integration test
+# Binaries (ovgenai + tests) land directly under <build>/ so the integration test
 # can reference the worker by a stable, configure-time absolute path.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
@@ -43,7 +43,7 @@ endif()
 set(Boost_USE_STATIC_LIBS ON CACHE BOOL "Prefer static boost libraries" FORCE)
 find_package(Boost 1.90 CONFIG REQUIRED COMPONENTS program_options)
 
-option(OVCLI_BUILD_TESTS  "Build the GoogleTest suite (worker/protocol/config)" ON)
+option(OVGENAI_BUILD_TESTS  "Build the GoogleTest suite (worker/protocol/config)" ON)
 
 find_package(OpenVINO COMPONENTS Runtime CONFIG REQUIRED)
 message(STATUS "OpenVINO: ${OpenVINO_VERSION} (${OpenVINO_DIR})")
@@ -51,60 +51,60 @@ message(STATUS "OpenVINO: ${OpenVINO_VERSION} (${OpenVINO_DIR})")
 find_package(OpenVINOGenAI CONFIG REQUIRED)
 message(STATUS "OpenVINO.GenAI: ${OpenVINOGenAI_VERSION} (${OpenVINOGenAI_DIR})")
 
-# Generated constants header consumed by ovcli_core; build output under
+# Generated constants header consumed by ovgenai_core; build output under
 # src/generated/ (gitignored, regenerated on every configure).
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/src/generated")
 
 configure_file(
-  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ovcli_config.h.in"
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/generated/ovcli_config.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/cmake/ovgenai_config.h.in"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/generated/ovgenai_config.h"
   @ONLY)
 
 # --- Engine core (static lib): everything but main.cpp ----------------------
-file(GLOB OVCLI_CORE_SOURCES CONFIGURE_DEPENDS
+file(GLOB OVGENAI_CORE_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/src/main/*.cpp")
-list(REMOVE_ITEM OVCLI_CORE_SOURCES
+list(REMOVE_ITEM OVGENAI_CORE_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/main/main.cpp")
 
-add_library(ovcli_core STATIC ${OVCLI_CORE_SOURCES})
-target_include_directories(ovcli_core PUBLIC
+add_library(ovgenai_core STATIC ${OVGENAI_CORE_SOURCES})
+target_include_directories(ovgenai_core PUBLIC
   "${CMAKE_CURRENT_SOURCE_DIR}/src/main"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/generated"
   "$<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>")
-target_link_libraries(ovcli_core PUBLIC RapidJSON)
-target_link_libraries(ovcli_core PUBLIC Boost::program_options)
-target_link_libraries(ovcli_core PUBLIC openvino::genai)
-target_compile_features(ovcli_core PUBLIC cxx_std_20)
+target_link_libraries(ovgenai_core PUBLIC RapidJSON)
+target_link_libraries(ovgenai_core PUBLIC Boost::program_options)
+target_link_libraries(ovgenai_core PUBLIC openvino::genai)
+target_compile_features(ovgenai_core PUBLIC cxx_std_20)
 
-# --- The ovcli executable: core + the CLI front-end ------------------------
-add_executable(ovcli "${CMAKE_CURRENT_SOURCE_DIR}/src/main/main.cpp")
-target_link_libraries(ovcli PRIVATE ovcli_core)
-set_target_properties(ovcli PROPERTIES OUTPUT_NAME ovcli)
+# --- The ovgenai executable: core + the CLI front-end ------------------------
+add_executable(ovgenai "${CMAKE_CURRENT_SOURCE_DIR}/src/main/main.cpp")
+target_link_libraries(ovgenai PRIVATE ovgenai_core)
+set_target_properties(ovgenai PROPERTIES OUTPUT_NAME ovgenai)
 
 # --- Tests ----------------------------------------------------------------
-if(OVCLI_BUILD_TESTS)
+if(OVGENAI_BUILD_TESTS)
   enable_testing()
   find_package(GTest REQUIRED)           # installed config exports GTest::GTest / GTest::Main
 
-  file(GLOB OVCLI_TEST_SOURCES CONFIGURE_DEPENDS
+  file(GLOB OVGENAI_TEST_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test/*.cpp")
 
   # The worker's absolute path is a configure-time fact (the exe is emitted to
   # CMAKE_RUNTIME_OUTPUT_DIRECTORY = <build>/), so bake it as a quoted macro.
-  add_executable(ovcli_tests
-    ${OVCLI_TEST_SOURCES}
+  add_executable(ovgenai_tests
+    ${OVGENAI_TEST_SOURCES}
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test/gtest_main.cpp")
-  target_link_libraries(ovcli_tests PRIVATE
-    ovcli_core GTest::GTest GTest::Main)
-  set_target_properties(ovcli_tests PROPERTIES
+  target_link_libraries(ovgenai_tests PRIVATE
+    ovgenai_core GTest::GTest GTest::Main)
+  set_target_properties(ovgenai_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
-  target_compile_definitions(ovcli_tests PRIVATE
-    OVCLI_WORKER_BIN="${CMAKE_CURRENT_BINARY_DIR}/ovcli")
+  target_compile_definitions(ovgenai_tests PRIVATE
+    OVGENAI_WORKER_BIN="${CMAKE_CURRENT_BINARY_DIR}/ovgenai")
 
   include(GoogleTest)
-  gtest_discover_tests(ovcli_tests
+  gtest_discover_tests(ovgenai_tests
     DISCOVERY_MODE POST_BUILD
     PROPERTIES
       TIMEOUT 120
-      ENVIRONMENT "OPENARC_WORKER_LOGFILE_STUB=/tmp/ovcli-integration-worker.log")
+      ENVIRONMENT "OPENARC_WORKER_LOGFILE_STUB=/tmp/ovgenai-integration-worker.log")
 endif()

@@ -1,4 +1,4 @@
-// ovcli's model-load config: the "Model load parameters" boost section this
+// ovgenai's model-load config: the "Model load parameters" boost section this
 // class owns (loadOptionsDesc / usage), its parser (validated against the load
 // enums + the free-JSON blobs), and its JSON round-trip.  The KV-cache /
 // batching (scheduler) knobs it used to carry moved to ModelSchedulerConfig,
@@ -24,7 +24,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 namespace {
 
@@ -115,13 +115,13 @@ std::string ModelLoadConfig::usage() {
 // scheduler flags a caller also passes are "known") for the option-name /
 // shorthand handling, then applies the domain validation (enums, numerics, JSON
 // objects) via the helpers below, producing one ModelLoadConfig that both
-// `ovcli worker` and `ovcli run` share.
+// `ovgenai worker` and `ovgenai run` share.
 ModelLoadConfig parseModelLoadConfig(const std::vector<std::string>& args) {
   const PreProcessed pp = preProcess(args);
   if (pp.positionalCount > 1) {
     throw ConfigError("only one positional (the model path) may be given; found "
                        + std::to_string(pp.positionalCount)
-                       + ". ovcli loads exactly one model -- set it with --model");
+                       + ". ovgenai loads exactly one model -- set it with --model");
   }
   std::vector<std::string> cleanArgs = pp.args;
   cleanArgs.erase(std::remove(cleanArgs.begin(), cleanArgs.end(), std::string("-")),
@@ -279,4 +279,4 @@ std::string describeConfig(const ModelLoadConfig& c) {
 }
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai

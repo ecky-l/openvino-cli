@@ -1,7 +1,7 @@
-// ovcli's engine-config layer for the OpenVINO GenAI backend (the .cpp half):
+// ovgenai's engine-config layer for the OpenVINO GenAI backend (the .cpp half):
 // each method owns one piece of the load-time / request-time logic —
 //   * build the ov::genai::SchedulerConfig from the scheduler config:
-//       ovcli::config::ModelSchedulerConfig::toSchedulerConfig()
+//       ovgenai::config::ModelSchedulerConfig::toSchedulerConfig()
 //       (definition moved to model_scheduler_config.cpp);
 //   * fold runtime_config / CACHE_DIR / scheduler_config / draft_model into the
 //     ov::AnyMap a pipeline is built from:  GenAIPipelineConfig::toPipelineProperties();
@@ -17,7 +17,7 @@
 
 #include <rapidjson/document.h>
 
-namespace ovcli {
+namespace ovgenai {
 namespace {
 
 // The free-form `--runtime-config` dict path used to live here (a rapidjson::Value
@@ -29,7 +29,7 @@ namespace {
 // The one gate this layer enforces on an authored scheduler_config block:
 //   "if ATTENTION_BACKEND == 'SDPA' in the runtime config and we have an authored
 //    scheduler_config block,  drop it and warn (SDPA pipelines cannot take one)."
-bool runtimeHasSDPA(const ovcli::config::ModelRuntimeConfig& runtime)
+bool runtimeHasSDPA(const ovgenai::config::ModelRuntimeConfig& runtime)
 {
     return runtime.attention_backend.has_value() &&
            *runtime.attention_backend == "SDPA";
@@ -39,7 +39,7 @@ bool runtimeHasSDPA(const ovcli::config::ModelRuntimeConfig& runtime)
 
 // (The KV-cache / batching scheduler config -- its schedulerConfigFromJson /
 //  hasAnySet / toSchedulerConfig -- used to be defined here as GenAISchedulerConfig.
-//  It is now ovcli::config::ModelSchedulerConfig in model_scheduler_config.cpp;
+//  It is now ovgenai::config::ModelSchedulerConfig in model_scheduler_config.cpp;
 //  GenAIPipelineConfig consumes it via its ModelSchedulerConfig member.)
 
 // ---------------------------------------------------------------------------
@@ -153,7 +153,7 @@ ov::AnyMap GenAIPipelineConfig::toPipelineProperties() const
         props["scheduler_config"] = ov::Any(sc);
     } else if (schedAuthored_ && runtimeHasSDPA(runtime_)) {
         std::fprintf(stderr,
-                     "ovcli: refusing to set scheduler_config: model '%s' uses "
+                     "ovgenai: refusing to set scheduler_config: model '%s' uses "
                      "ATTENTION_BACKEND=SDPA which cannot accept one\n",
                      cfg_.model.c_str());
     }
@@ -171,17 +171,17 @@ ov::AnyMap GenAIPipelineConfig::toPipelineProperties() const
                 std::filesystem::path(*cfg_.draft_model),
                 dev, draftProps);
             (void)name;
-            std::fprintf(stderr, "ovcli: loaded draft model from %s on %s\n",
+            std::fprintf(stderr, "ovgenai: loaded draft model from %s on %s\n",
                          cfg_.draft_model->c_str(), dev.c_str());
             props["draft_model"] = draftAny;
         } catch (const ov::Exception& e) {
             std::fprintf(stderr,
-                         "ovcli: failed to load draft model from %s: %s — "
+                         "ovgenai: failed to load draft model from %s: %s — "
                          "continuing without speculative decoding\n",
                          cfg_.draft_model->c_str(), e.what());
         } catch (const std::exception& e) {
             std::fprintf(stderr,
-                         "ovcli: failed to load draft model from %s: %s — "
+                         "ovgenai: failed to load draft model from %s: %s — "
                          "continuing without speculative decoding\n",
                          cfg_.draft_model->c_str(), e.what());
         }
@@ -225,4 +225,4 @@ ov::genai::GenerationConfig makeGenerationConfig(const ModelRequestConfig& rt)
     return gc.toGenerationConfig();
 }
 
-}  // namespace ovcli
+}  // namespace ovgenai

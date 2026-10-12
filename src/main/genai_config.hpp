@@ -1,9 +1,9 @@
-// ovcli's engine-config layer for the OpenVINO GenAI backend.
+// ovgenai's engine-config layer for the OpenVINO GenAI backend.
 //
 // The generation / pipeline structs hold the per-request generation parameters
 // and the pipeline-provisioning values respectively; the KV-cache / batching
 // knobs are not here -- they are the first-class
-// ovcli::config::ModelSchedulerConfig (model_scheduler_config.hpp).
+// ovgenai::config::ModelSchedulerConfig (model_scheduler_config.hpp).
 // GenAIPipelineConfig is the load-time counterpart that provisions a pipeline
 // and produces the ov::AnyMap the OpenVINO GenAI LLMPipeline / VLMPipeline
 // constructor consumes.
@@ -13,16 +13,16 @@
 // sentinel);  for each bool field a value forwards only when has_value() &&
 // *val == true.  This preserves the engine defaults for everything that was
 // never explicitly set (an operator setting a field to 0 / False is a no-op).
-#ifndef OVCLI_GENAI_CONFIG_HPP
-#define OVCLI_GENAI_CONFIG_HPP
+#ifndef OVGENAI_GENAI_CONFIG_HPP
+#define OVGENAI_GENAI_CONFIG_HPP
 
 #include <optional>
 #include <string>
 
-// The concrete config structs + ConfigError moved to namespace ovcli::config
+// The concrete config structs + ConfigError moved to namespace ovgenai::config
 // (see config.hpp / model_load_config.hpp / model_request_config.hpp /
 // model_scheduler_config.hpp); they are pulled in here and re-exported into
-// ovcli so the GenAI config layer can name them.  The scheduler config -- and
+// ovgenai so the GenAI config layer can name them.  The scheduler config -- and
 // the former GenAISchedulerConfig it absorbed -- now lives in
 // model_scheduler_config and is re-exported too.
 #include "config.hpp"
@@ -38,18 +38,18 @@
 
 #include <rapidjson/document.h>
 
-namespace ovcli {
+namespace ovgenai {
 
-using ovcli::config::ConfigError;
-using ovcli::config::ModelLoadConfig;
-using ovcli::config::ModelRequestConfig;
-using ovcli::config::ModelRuntimeConfig;               // the runtime config,  first-class here too
-using ovcli::config::ModelSchedulerConfig;             // absorbed the former GenAISchedulerConfig
-using ovcli::config::modelSchedulerConfigFromJson;     // its JSON reader, re-exported for the tests
+using ovgenai::config::ConfigError;
+using ovgenai::config::ModelLoadConfig;
+using ovgenai::config::ModelRequestConfig;
+using ovgenai::config::ModelRuntimeConfig;               // the runtime config,  first-class here too
+using ovgenai::config::ModelSchedulerConfig;             // absorbed the former GenAISchedulerConfig
+using ovgenai::config::modelSchedulerConfigFromJson;     // its JSON reader, re-exported for the tests
 
 // ---------------------------------------------------------------------------
 // (The typed scheduler config used to live in this file as GenAISchedulerConfig.
-//  It is now ovcli::config::ModelSchedulerConfig in model_scheduler_config.hpp
+//  It is now ovgenai::config::ModelSchedulerConfig in model_scheduler_config.hpp
 //  -- the first-class sibling of the load / request configs: the same 10
 //  std::optional fields, plus its own CLI section ("Scheduler Options"),
 //  toSchedulerConfig(), hasAnySet(), and the JSON readers, re-exported into
@@ -65,7 +65,7 @@ using ovcli::config::modelSchedulerConfigFromJson;     // its JSON reader, re-ex
 //  to hand to a pipeline's generate(), call toGenerationConfig() —  no
 //  model-level arguments;  the request is the only source of values.
 //  (OpenVINO GenAI's own C++ API has no concept of model-level defaults;
-//  in ovcli the per-request knobs live in ModelRequestConfig, not the load
+//  in ovgenai the per-request knobs live in ModelRequestConfig, not the load
 //  config.)
 struct GenAIGenerationConfig {
     std::size_t max_tokens            = 16384;
@@ -99,7 +99,7 @@ struct GenAIGenerationConfig {
 //   * loadConfig() / scheduler() / schedulerAuthored() — accessors.
 //
 // Note:  num_assistant_tokens / assistant_confidence_threshold are
-// per-request (ModelRequestConfig) in ovcli's design;  they do not appear
+// per-request (ModelRequestConfig) in ovgenai's design;  they do not appear
 // here.  The pipeline is configured solely by the scheduler config, the
 // runtime properties (which now include CACHE_DIR), and the draft model.
 class GenAIPipelineConfig {
@@ -155,6 +155,6 @@ class GenAIPipelineConfig {
 // generation parameters.
 ov::genai::GenerationConfig makeGenerationConfig(const ModelRequestConfig& rt);
 
-}  // namespace ovcli
+}  // namespace ovgenai
 
-#endif  // OVCLI_GENAI_CONFIG_HPP
+#endif  // OVGENAI_GENAI_CONFIG_HPP

@@ -67,5 +67,5 @@ vcpkg_installed/
 Testing/
 .cache/
 
-# CMake-generated ovcli_config.h (regenerated on every configure)
+# CMake-generated ovgenai_config.h (regenerated on every configure)
 src/generated/

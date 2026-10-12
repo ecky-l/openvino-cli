@@ -13,7 +13,7 @@
 
 #include "genai_config.hpp"
 
-using namespace ovcli;
+using namespace ovgenai;
 
 namespace {
 

@@ -1,5 +1,5 @@
 // Unit tests for the shared load-model config (src/main/config.cpp): the arg
-// parser that both `ovcli worker` and `ovcli run` consume, and the tolerant
+// parser that both `ovgenai worker` and `ovgenai run` consume, and the tolerant
 // JSON round-trip that is its from-LOAD-message analog.
 //
 // The parser is boost::program_options (static), with a single-letter short
@@ -20,8 +20,8 @@
 #include "../main/model_request_config.hpp"
 
 // The config symbols (structs + their parse / JSON helpers + ConfigError) now
-// live in namespace ovcli::config; pull them in unqualified for the tests.
-using namespace ovcli::config;
+// live in namespace ovgenai::config; pull them in unqualified for the tests.
+using namespace ovgenai::config;
 
 namespace {
 
@@ -158,7 +158,7 @@ TEST(parseLoadModel, badEnumsReject) {
 
 TEST(parseLoadModel, unknownLongAndShortOptionReject) {
   // An unrecognised long, an unrecognised single-letter short, or (the options
-  // ovcli dropped: context-window / worker-max-respawns
+  // ovgenai dropped: context-window / worker-max-respawns
   // / worker-line-limit are not worker properties) -- each must produce a
   // ConfigError whose text mentions "unknown option".
   expectConfigErrorContains([] { parseModelLoadConfig(validMinAppend({"--nope", "1"})); },
@@ -258,7 +258,7 @@ TEST(jsonRoundTrip, fullConfig) {
   // and the runtime config actually captured the one set field
   ASSERT_TRUE(rt.kv_cache_precision.has_value());
   EXPECT_EQ(*rt.kv_cache_precision, std::string("bf16"));
-  // the emitted load JSON must not carry the three fields ovcli deliberately dropped
+  // the emitted load JSON must not carry the three fields ovgenai deliberately dropped
   std::string js = modelLoadConfigToJson(load);
   EXPECT_EQ(js.find("context_window"), std::string::npos);
   EXPECT_EQ(js.find("worker_max_respawns"), std::string::npos);
@@ -270,7 +270,7 @@ TEST(jsonRoundTrip, fullConfig) {
 
 TEST(jsonRoundTrip, adoptsAndIgnoresForeignKeys) {
   // A config shaped like a supervisor's model_dump, complete with the keys
-  // ovcli dropped (context_window / worker_max_respawns / worker_line_limit):
+  // ovgenai dropped (context_window / worker_max_respawns / worker_line_limit):
   // known keys are read, the rest simply
   // ignored (not fatal).
   auto c = modelLoadConfigFromJson(

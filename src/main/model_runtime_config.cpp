@@ -1,4 +1,4 @@
-// ovcli's runtime config: the "Runtime config options" boost section this class
+// ovgenai's runtime config: the "Runtime config options" boost section this class
 // owns (runtimeOptionsDesc / usage), its parser (validated against the load /
 // scheduler / request sections the siblings own so their flags are "known",
 // reading only the runtime fields), its JSON round-trip, and toProperties()
@@ -36,7 +36,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 namespace {
 
@@ -361,7 +361,7 @@ ModelRuntimeConfig parseModelRuntimeConfig(const std::vector<std::string>& args)
   if (pp.positionalCount > 1) {
     throw ConfigError("only one positional (the model path) may be given; found "
                        + std::to_string(pp.positionalCount)
-                       + ". ovcli loads exactly one model -- set it with --model");
+                       + ". ovgenai loads exactly one model -- set it with --model");
   }
   std::vector<std::string> cleanArgs = pp.args;
   cleanArgs.erase(std::remove(cleanArgs.begin(), cleanArgs.end(), std::string("-")),
@@ -609,4 +609,4 @@ std::string modelRuntimeConfigToJson(const ModelRuntimeConfig& c) {
 }
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai

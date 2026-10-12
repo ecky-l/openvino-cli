@@ -1,24 +1,24 @@
-// The single model one ovcli process loads.
+// The single model one ovgenai process loads.
 //
 // A supervisor may also push this down a pipe via a `LOAD` protocol message
-// carrying a `load_config` JSON string. ovcli is decoupled from that: it hosts
+// carrying a `load_config` JSON string. ovgenai is decoupled from that: it hosts
 // exactly ONE model, so its load config is a single-model view of the same knobs
 // and arrives from the command line (for the long-lived `worker`) and the
 // process's own defaults (for the one-shot `run`), and can round-trip as JSON so
 // the struct is a self-describing answer to "which model, what settings".
 //
-// Fields ovcli deliberately does not expose, and why:
-//   * worker_max_respawns -- a *supervisor-side* respawn budget. ovcli IS the
+// Fields ovgenai deliberately does not expose, and why:
+//   * worker_max_respawns -- a *supervisor-side* respawn budget. ovgenai IS the
 //     worker; whoever respawns it owns that budget.
 //   * context_window      -- an OpenAI-/v1_models *advertising* knob the
-//     HTTP server reports; ovcli has no such face, so nothing to advertise.
+//     HTTP server reports; ovgenai has no such face, so nothing to advertise.
 //   * worker_line_limit   -- a *transport* knob (max bytes per line of the
-//     stdin/stdout protocol loop); only `ovcli worker` has such a loop.
+//     stdin/stdout protocol loop); only `ovgenai worker` has such a loop.
 // The load flag map + its single-letter alias rules live below
 // (loadOptionsDesc / usage); the argv/boost/number/JSON coercions both sections
 // share live in config.hpp.
-#ifndef OVCLI_MODEL_LOAD_CONFIG_HPP
-#define OVCLI_MODEL_LOAD_CONFIG_HPP
+#ifndef OVGENAI_MODEL_LOAD_CONFIG_HPP
+#define OVGENAI_MODEL_LOAD_CONFIG_HPP
 
 #include <cstddef>
 #include <optional>
@@ -28,7 +28,7 @@
 #include <boost/program_options.hpp>   // for po::options_description in loadOptionsDesc
 #include "config.hpp"                  // ConfigError + the parse helpers both sections share
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 
 // The load knobs this struct carries, in declaration order (see the note above
@@ -75,20 +75,20 @@ struct ModelLoadConfig {
 
 // Parse + validate the load-model flags from `args` (the argv after the
 // subcommand name) via boost::program_options, returning the one ModelLoadConfig
-// both `ovcli worker` and `ovcli run` share. Parsed over all three sections (our
+// both `ovgenai worker` and `ovgenai run` share. Parsed over all three sections (our
 // own plus the request + scheduler sections the sibling classes own, so the
 // flags a caller also passes are "known", not "unknown option") but only the
 // load fields are read. Throws ConfigError on a missing / unknown / invalid flag.
 ModelLoadConfig parseModelLoadConfig(const std::vector<std::string>& args);
 
-// Parse a load_config JSON object into a ModelLoadConfig. ovcli deliberately
+// Parse a load_config JSON object into a ModelLoadConfig. ovgenai deliberately
 // *tolerates* unknown top-level keys -- it consumes the single model it uses and
 // drops the rest (a strict schema would reject them outright), since the config
 // no longer travels inside a fixed schema. Throws ConfigError on a malformed /
 // non-object value or a missing required field.
 ModelLoadConfig modelLoadConfigFromJson(const std::string& json);
 
-// Serialize a config back to compact JSON using only the field set ovcli uses
+// Serialize a config back to compact JSON using only the field set ovgenai uses
 // (context_window / worker_max_respawns / worker_line_limit are absent).
 // Round-trips through modelLoadConfigFromJson.
 std::string modelLoadConfigToJson(const ModelLoadConfig& config);
@@ -98,6 +98,6 @@ std::string modelLoadConfigToJson(const ModelLoadConfig& config);
 std::string describeConfig(const ModelLoadConfig& config);
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai
 
-#endif  // OVCLI_MODEL_LOAD_CONFIG_HPP
+#endif  // OVGENAI_MODEL_LOAD_CONFIG_HPP

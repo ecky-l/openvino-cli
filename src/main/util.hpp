@@ -1,14 +1,14 @@
 // Small self-contained helpers (no third-party deps beyond the C++ stdlib).
 // Kept deliberately tiny: base64 + env access, independent of the config layer,
 // so earlier phases can use them before the config code exists.
-#ifndef OVCLI_UTIL_HPP
-#define OVCLI_UTIL_HPP
+#ifndef OVGENAI_UTIL_HPP
+#define OVGENAI_UTIL_HPP
 
 #include <optional>
 #include <string>
 #include <vector>
 
-namespace ovcli {
+namespace ovgenai {
 
 // getenv(key), or `def` when the key is unset or, when `treat_empty_as_missing`
 // is true, when the value is an empty string (an empty value counts as missing).
@@ -24,6 +24,6 @@ bool env_flag_on(const std::string& key);
 std::string base64_encode(const std::string& in);
 std::string base64_decode(const std::string& in);
 
-}  // namespace ovcli
+}  // namespace ovgenai
 
-#endif  // OVCLI_UTIL_HPP
+#endif  // OVGENAI_UTIL_HPP

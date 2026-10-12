@@ -1,4 +1,4 @@
-// ovcli's per-request generation config: the "Model request parameters" boost
+// ovgenai's per-request generation config: the "Model request parameters" boost
 // section this class owns (requestOptionsDesc / usage), its parser, and its JSON
 // round-trip (snake_case keys, so the wire form is identical on both sides).
 // Request-only helpers live in this file's anonymous namespace; the argv / boost
@@ -25,7 +25,7 @@
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 namespace {
 
@@ -161,7 +161,7 @@ std::string ModelRequestConfig::usage() {
   return os.str();
 }
 
-// --- Public: parseModelRequestConfig (for ovcli run) -------------------------
+// --- Public: parseModelRequestConfig (for ovgenai run) -------------------------
 //
 // Reads only the generation-config fields (alphabetical). Parsed over the full
 // argv (this class's section plus the load + runtime + scheduler sections the
@@ -172,7 +172,7 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
   if (pp.positionalCount > 1) {
     throw ConfigError("only one positional (the model path) may be given; found "
                        + std::to_string(pp.positionalCount)
-                       + ". ovcli loads exactly one model -- set it with --model");
+                       + ". ovgenai loads exactly one model -- set it with --model");
   }
   std::vector<std::string> cleanArgs = pp.args;
   cleanArgs.erase(std::remove(cleanArgs.begin(), cleanArgs.end(), std::string("-")),
@@ -340,4 +340,4 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
 }
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai

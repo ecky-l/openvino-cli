@@ -1,4 +1,4 @@
-// ovcli's runtime config: the knobs that shape how a loaded pipeline is compiled
+// ovgenai's runtime config: the knobs that shape how a loaded pipeline is compiled
 // and run on a device.  It is the first-class sibling of ModelLoadConfig /
 // ModelSchedulerConfig / ModelRequestConfig (see those headers);  it absorbs the
 // free-form `--runtime-config` JSON blob that used to hang off ModelLoadConfig.
@@ -16,7 +16,7 @@
 //     itself an OpenVINO Runtime property,  so it belongs HERE,  in this class.
 //   * DEVICE_ID  (ov::device_id:  id 0 = first device,  1 = second,  ...) is only
 //     the *instance* filter on a plugin's available_devices --  but the device
-//     itself is the load config's --device,  the positional argument OpenArc /
+//     itself is the load config's --device,
 //     the worker pass to the LLMPipeline / VLMPipeline / ...  constructor;  it is
 //     never set as a property,  so DEVICE_ID stays excluded,  overlapping the
 //     load config's primary device selection.
@@ -44,8 +44,8 @@
 // emitted ov::AnyMap,  so an unmentioned runtime config is the empty object and
 // the engine's own default is left to the engine,  while a field an operator
 // names (including 0 / false,  which are valid explicit values) is forwarded.
-#ifndef OVCLI_MODEL_RUNTIME_CONFIG_HPP
-#define OVCLI_MODEL_RUNTIME_CONFIG_HPP
+#ifndef OVGENAI_MODEL_RUNTIME_CONFIG_HPP
+#define OVGENAI_MODEL_RUNTIME_CONFIG_HPP
 
 #include <cstddef>
 #include <cstdint>
@@ -57,7 +57,7 @@
 
 #include "config.hpp"  // ConfigError + the parse / number / JSON helpers all sections share
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 
 // The runtime knobs, in *alphabetical field order* (the field below IS the
@@ -154,6 +154,6 @@ ModelRuntimeConfig modelRuntimeConfigFromJson(const std::string& json);
 std::string modelRuntimeConfigToJson(const ModelRuntimeConfig& config);
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai
 
-#endif  // OVCLI_MODEL_RUNTIME_CONFIG_HPP
+#endif  // OVGENAI_MODEL_RUNTIME_CONFIG_HPP

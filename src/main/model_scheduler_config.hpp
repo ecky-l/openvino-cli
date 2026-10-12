@@ -1,9 +1,9 @@
-// ovcli's scheduler config: the KV-cache / batching knobs that shape how a
+// ovgenai's scheduler config: the KV-cache / batching knobs that shape how a
 // loaded pipeline schedules and caches.  It is the first-class sibling of
 // ModelLoadConfig / ModelRequestConfig (see those headers): one source of truth
 // that
 //   * owns the "Scheduler Options" boost section (schedulerOptionsDesc / usage),
-//     shown as its own header in `ovcli <cmd> --help`,
+//     shown as its own header in `ovgenai <cmd> --help`,
 //   * parses them from the CLI (parseModelSchedulerConfig) and from a JSON
 //     object (modelSchedulerConfigFromJson), and serialises them (…ToJson),
 //   * is the C++ holder for those knobs: every field is std::optional so
@@ -13,13 +13,13 @@
 //     nonzero / true), so an explicit 0 or false leaves the engine default alone.
 //
 // It absorbed the former GenAISchedulerConfig from the engine-config layer: that
-// typed analog now lives here, in ovcli::config, so the one set of scheduler
+// typed analog now lives here, in ovgenai::config, so the one set of scheduler
 // fields is owned by exactly one class.  ModelLoadConfig no longer carries them
 // -- the pipeline gets them through this class instead.  (The 10 fields are
 // kept in *alphabetical order*,  so the struct,  the --help listing,  and the
 // JSON round-trip all read the same way top-to-bottom.)
-#ifndef OVCLI_MODEL_SCHEDULER_CONFIG_HPP
-#define OVCLI_MODEL_SCHEDULER_CONFIG_HPP
+#ifndef OVGENAI_MODEL_SCHEDULER_CONFIG_HPP
+#define OVGENAI_MODEL_SCHEDULER_CONFIG_HPP
 
 #include <cstddef>
 #include <optional>
@@ -31,7 +31,7 @@
 
 #include "config.hpp"  // ConfigError + the parse helpers all sections share
 
-namespace ovcli {
+namespace ovgenai {
 namespace config {
 
 // The 10 scheduler knobs, each std::optional so "nullopt" means "leave the
@@ -95,6 +95,6 @@ ModelSchedulerConfig modelSchedulerConfigFromJson(const std::string& json);
 std::string modelSchedulerConfigToJson(const ModelSchedulerConfig& config);
 
 }  // namespace config
-}  // namespace ovcli
+}  // namespace ovgenai
 
-#endif  // OVCLI_MODEL_SCHEDULER_CONFIG_HPP
+#endif  // OVGENAI_MODEL_SCHEDULER_CONFIG_HPP
