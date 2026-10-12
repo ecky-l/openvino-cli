@@ -89,8 +89,10 @@ int32_t parseSignedInt(const std::string& s, const char* flag) {
 // --- The closed-value (hint / enum) fields:  the UPPER-SNAKE a value must be
 //     (OpenVINO's own operator>> forms),  one vector per such field (matching
 //     the field name to the left in the parser). ----------------------------
-const std::vector<std::string> kAttentionBackend = {"NAIVE", "PAGED", "SDPA",
-                                                    "VINT_2FA", "VINT_2FA_PAGED"};
+// ATTENTION_BACKEND's accepted tokens come from openvino_genai (utils.cpp:
+// PA_BACKEND == "PA",  SDPA_BACKEND == "SDPA") -- the two backends the GenAI
+// pipeline actually selects between;  everything else is from ov::properties.
+const std::vector<std::string> kAttentionBackend = {"PA", "SDPA"};
 const std::vector<std::string> kCacheMode        = {"OPTIMIZE_SIZE", "OPTIMIZE_SPEED"};
 const std::vector<std::string> kExecutionMode    = {"PERFORMANCE", "ACCURACY"};
 const std::vector<std::string> kLogLevel         = {"LOG_NONE", "LOG_ERROR", "LOG_WARNING",
@@ -115,8 +117,8 @@ void setEnumFromCli(std::optional<std::string>& field, const char* flag,
 }
 
 // Set a free-form string field from its CLI string: empty clears to nullopt,
-// any other value is stored verbatim (the value is open-ended: a device name,
-// a precision, a path,  ...).
+// any other value is stored verbatim (the value is open-ended: a precision,
+// a path, a weights path,  ...).
 void setStrFromCli(std::optional<std::string>& field, const std::string& raw) {
   if (raw.empty()) field = std::nullopt; else field = raw;
 }
@@ -179,72 +181,72 @@ void readOptDouble(rapidjson::Value& v, const char* name, std::optional<double>&
 // The "Runtime config options" boost section this class owns:  one long-form
 // flag per runtime property (the field dashed -- lowercase,  " _ substituted by
 // -,  trailing --",  per the user's rule,  e.g. --kv-cache-precision),  in
-// alphabetical-flag order.  Long-form only (with ~25 of them a single letter is
+// alphabetical-flag order.  Long-form only (with ~28 of them a single letter is
 // no longer a sensible alias,  unlike the smaller load / scheduler sections).
 // Single source of truth for both usage() and parseModelRuntimeConfig.
+// Each help string is a concise paraphrase of the matching OpenVINO property's
+// doc comment (ov runtime properties.hpp;  genai utils.cpp for ATTENTION_BACKEND).
 // ---------------------------------------------------------------------------
 po::options_description ModelRuntimeConfig::runtimeOptionsDesc() {
   po::options_description s(
       "Runtime config options (OpenVINO Runtime properties; empty/default -- leave the engine default)");
   s.add_options()
     ("activations-scale-factor", po::value<std::string>(),
-        "ACTIVATIONS_SCALE_FACTOR: NPU activation scaling factor")
+        "Scales down activations to guard against overflow when the inference precision is f16 (a float factor)")
     ("attention-backend", po::value<std::string>(),
-        "ATTENTION_BACKEND: NAIVE / PAGED / SDPA (and the VINT_2FA* variants)")
+        "Attention (KV-cache) backend: PA = PagedAttention (the continuous-batching backend); SDPA = Scaled-Dot-Product (the default)")
     ("auto-batch-timeout", po::value<std::string>(),
-        "AUTO_BATCH_TIMEOUT (seconds)")
+        "Auto-batching timeout in milliseconds: how long to wait for more input before dispatching a collected batch")
     ("cache-dir", po::value<std::string>(),
-        "CACHE_DIR: the OpenVINO compile cache dir")
+        "Directory the plugins cache compiled blobs/models into; a path -- empty or unset disables caching (may go stale after an OpenVINO update)")
     ("cache-mode", po::value<std::string>(),
-        "CACHE_MODE: OPTIMIZE_SIZE / OPTIMIZE_SPEED")
+        "Cache mode: OPTIMIZE_SIZE (smaller cache files) or OPTIMIZE_SPEED (faster load, larger files; the default)")
     ("compilation-num-threads", po::value<std::string>(),
-        "COMPILATION_NUM_THREADS: may be negative; 0 = all cores")
-    ("device-id", po::value<std::string>(),
-        "DEVICE_ID: a device selector")
+        "Maximum number of threads for compiling the model; may be negative, 0 = all cores")
     ("enable-cpu-pinning", po::value<std::string>(),
-        "ENABLE_CPU_PINNING: true/false")
+        "Whether to bind each inference thread to a core (true/false; Windows/Linux only, off on macOS -- the engine picks a default if unset)")
     ("enable-cpu-reservation", po::value<std::string>(),
-        "ENABLE_CPU_RESERVATION: true/false")
+        "Whether to reserve CPU cores so other plugins/compiled models will not use them (true/false; off by default; Windows/Linux only)")
     ("enable-hyper-threading", po::value<std::string>(),
-        "ENABLE_HYPER_THREADING: true/false")
+        "Whether to use CPU hyper-threading (true/false; the engine chooses a default if unset)")
     ("enable-mmap", po::value<std::string>(),
-        "ENABLE_MMAP: true/false")
+        "Whether to read the model via mmap() (true/false; on by default; supported only by the IR frontend for now)")
     ("enable-weightless", po::value<std::string>(),
-        "ENABLE_WEIGHTLESS: true/false")
+        "Whether to use weightless caching -- cache the model topology separately from its weights (true/false)")
     ("execution-mode-hint", po::value<std::string>(),
-        "EXECUTION_MODE_HINT: PERFORMANCE / ACCURACY")
+        "Device-agnostic execution hint: PERFORMANCE (optimises for speed, may cost accuracy) or ACCURACY (optimises for accuracy, the default)")
     ("force-tbb-terminate", po::value<std::string>(),
-        "FORCE_TBB_TERMINATE: true/false")
+        "Whether to force-terminate TBB when the core is destroyed (true terminates it; false does no extra TBB work on destruction)")
     ("inference-num-threads", po::value<std::string>(),
-        "INFERENCE_NUM_THREADS: may be negative; 0 = all cores")
+        "Maximum number of threads for inference tasks; may be negative, 0 = all cores")
     ("inference-precision-hint", po::value<std::string>(),
-        "INFERENCE_PRECISION_HINT: an element type, e.g. f16 / f32 / bf16")
+        "Element type to use for inference, e.g. f16 / f32 / bf16 -- every device turns this hint into its own device-specific settings")
     ("key-cache-group-size", po::value<std::string>(),
-        "KEY_CACHE_GROUP_SIZE")
+        "Sub-channel quantization group size for the key cache; 0 (the default) treats each whole channel as one group")
     ("key-cache-precision", po::value<std::string>(),
-        "KEY_CACHE_PRECISION: key-cache element type")
+        "Element type for KV-cache keys, overriding the umbrella KV_CACHE_PRECISION for the key side (u4 / i8 / u8 / f16 / bf16 / f32)")
     ("kv-cache-precision", po::value<std::string>(),
-        "KV_CACHE_PRECISION: KV-cache element type, e.g. bf16 / f16 / f32")
+        "Umbrella element type for KV-cache compression, e.g. bf16 / f16 / f32 -- overridable per side by --key-cache-precision / --value-cache-precision")
     ("log-level", po::value<std::string>(),
-        "LOG_LEVEL: LOG_NONE / LOG_ERROR / LOG_WARNING / LOG_INFO / LOG_DEBUG / LOG_TRACE")
+        "Logging level: LOG_NONE / LOG_ERROR / LOG_WARNING / LOG_INFO / LOG_DEBUG / LOG_TRACE")
     ("model-priority", po::value<std::string>(),
-        "MODEL_PRIORITY: LOW / MEDIUM / HIGH / DEFAULT")
+        "Model priority hint: LOW / MEDIUM (the default) / HIGH / DEFAULT -- a higher priority is served more-performant bounded resources first")
     ("num-streams", po::value<std::string>(),
-        "NUM_STREAMS")
+        "Number of executor streams (logical partitions) for inference")
     ("performance-hint", po::value<std::string>(),
-        "PERFORMANCE_HINT: LATENCY / THROUGHPUT / CUMULATIVE_THROUGHPUT")
+        "Device-agnostic performance hint: LATENCY / THROUGHPUT / CUMULATIVE_THROUGHPUT -- every device turns it into device-specific settings")
     ("performance-hint-num-requests", po::value<std::string>(),
-        "PERFORMANCE_HINT_NUM_REQUESTS")
+        "Number of inference requests expected in flight, which backs the performance hint (e.g. number of cameras / input sources)")
     ("scheduling-core-type", po::value<std::string>(),
-        "SCHEDULING_CORE_TYPE: ANY_CORE / PCORE_ONLY / ECORE_ONLY")
+        "CPU core type for inference: ANY_CORE / PCORE_ONLY (performance cores) / ECORE_ONLY (efficient cores) -- a p-core-only platform still uses its performance cores")
     ("value-cache-group-size", po::value<std::string>(),
-        "VALUE_CACHE_GROUP_SIZE")
+        "Sub-channel quantization group size for the value cache; 0 (the default) treats each whole channel as one group")
     ("value-cache-precision", po::value<std::string>(),
-        "VALUE_CACHE_PRECISION: value-cache element type")
+        "Element type for KV-cache values, overriding the umbrella KV_CACHE_PRECISION for the value side (u4 / u8 / f16 / bf16 / f32)")
     ("weights-path", po::value<std::string>(),
-        "WEIGHTS_PATH: a weights path")
+        "Path to a file holding the model's weights; used for weightless caching, i.e. when CACHE_MODE is OPTIMIZE_SIZE")
     ("workload-type", po::value<std::string>(),
-        "WORKLOAD_TYPE (e.g. GENERATION)");
+        "NPU execution priority: DEFAULT or EFFICIENT -- NPU only");
   return s;
 }
 
@@ -263,7 +265,6 @@ bool ModelRuntimeConfig::hasAnySet() const {
          !cache_dir.value_or("").empty()       ||
          !cache_mode.value_or("").empty()    ||
          compilation_num_threads.has_value()   ||
-         !device_id.value_or("").empty()      ||
          enable_cpu_pinning.has_value()        ||
          enable_cpu_reservation.has_value()    ||
          enable_hyper_threading.has_value()    ||
@@ -321,7 +322,6 @@ ov::AnyMap ModelRuntimeConfig::toProperties() const {
   addStr("CACHE_DIR",                cache_dir);
   addStr("CACHE_MODE",               cache_mode);
   addInt32("COMPILATION_NUM_THREADS", compilation_num_threads);
-  addStr("DEVICE_ID",                device_id);
   addBool("ENABLE_CPU_PINNING",      enable_cpu_pinning);
   addBool("ENABLE_CPU_RESERVATION",  enable_cpu_reservation);
   addBool("ENABLE_HYPER_THREADING",  enable_hyper_threading);
@@ -451,8 +451,6 @@ ModelRuntimeConfig parseModelRuntimeConfig(const std::vector<std::string>& args)
   // string
   if (vm.count("cache-dir"))
     setStrFromCli(cfg.cache_dir, vm["cache-dir"].as<std::string>());
-  if (vm.count("device-id"))
-    setStrFromCli(cfg.device_id, vm["device-id"].as<std::string>());
   if (vm.count("weights-path"))
     setStrFromCli(cfg.weights_path, vm["weights-path"].as<std::string>());
   if (vm.count("workload-type"))
@@ -494,10 +492,9 @@ ModelRuntimeConfig modelRuntimeConfigFromJson(const std::string& json) {
     if (k == "activations_scale_factor")       readOptDouble(v, "activations_scale_factor", cfg.activations_scale_factor);
     else if (k == "attention_backend")         readOptStr(v, "attention_backend", cfg.attention_backend);
     else if (k == "auto_batch_timeout")        readOptSize(v, "auto_batch_timeout", cfg.auto_batch_timeout);
-    else if (k == "cache_dir")                  readOptStr(v, "cache_dir", cfg.cache_dir);
-    else if (k == "cache_mode")                 readOptStr(v, "cache_mode", cfg.cache_mode);
+    else if (k == "cache_dir")                 readOptStr(v, "cache_dir", cfg.cache_dir);
+    else if (k == "cache_mode")                readOptStr(v, "cache_mode", cfg.cache_mode);
     else if (k == "compilation_num_threads")   readOptInt32(v, "compilation_num_threads", cfg.compilation_num_threads);
-    else if (k == "device_id")                  readOptStr(v, "device_id", cfg.device_id);
     else if (k == "enable_cpu_pinning")         readOptBool(v, "enable_cpu_pinning", cfg.enable_cpu_pinning);
     else if (k == "enable_cpu_reservation")     readOptBool(v, "enable_cpu_reservation", cfg.enable_cpu_reservation);
     else if (k == "enable_hyper_threading")     readOptBool(v, "enable_hyper_threading", cfg.enable_hyper_threading);
@@ -575,10 +572,9 @@ std::string modelRuntimeConfigToJson(const ModelRuntimeConfig& c) {
   addDouble("activations_scale_factor",       c.activations_scale_factor);
   addStr("attention_backend",                 c.attention_backend);
   addInt("auto_batch_timeout",                c.auto_batch_timeout);
-  addStr("cache_dir",                          c.cache_dir);
-  addStr("cache_mode",                        c.cache_mode);
+  addStr("cache_dir",                        c.cache_dir);
+  addStr("cache_mode",                      c.cache_mode);
   addInt32("compilation_num_threads",         c.compilation_num_threads);
-  addStr("device_id",                         c.device_id);
   addBool("enable_cpu_pinning",               c.enable_cpu_pinning);
   addBool("enable_cpu_reservation",           c.enable_cpu_reservation);
   addBool("enable_hyper_threading",           c.enable_hyper_threading);

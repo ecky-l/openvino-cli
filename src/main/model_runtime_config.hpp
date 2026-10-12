@@ -10,10 +10,16 @@
 // log / streams namespaces),  plus ATTENTION_BACKEND,  the one genai-specific
 // runtime property GenAIPipelineConfig keys its SDPA-vs-paged gate on.
 // Read-only properties a user can't set (AVAILABLE_DEVICES / NETWORK_NAME /
-// *NUMBER_OF_INFER_REQUESTS / DEVICE_* / SUPPORTED_PROPERTIES / ...) are
-// deliberately excluded.  CACHE_DIR,  though it used to sit on ModelLoadConfig,
-// is itself an OpenVINO Runtime property (ov::cache_dir)  --  so it belongs
-// HERE,  in this class.
+// *NUMBER_OF_INFER_REQUESTS / SUPPORTED_PROPERTIES / ...) are deliberately
+// excluded.  Two moves about the device / cache knobs are worth noting:
+//   * CACHE_DIR  (ov::cache_dir)  used to sit on ModelLoadConfig,  but it is
+//     itself an OpenVINO Runtime property,  so it belongs HERE,  in this class.
+//   * DEVICE_ID  (ov::device_id:  id 0 = first device,  1 = second,  ...) is only
+//     the *instance* filter on a plugin's available_devices --  but the device
+//     itself is the load config's --device,  the positional argument OpenArc /
+//     the worker pass to the LLMPipeline / VLMPipeline / ...  constructor;  it is
+//     never set as a property,  so DEVICE_ID stays excluded,  overlapping the
+//     load config's primary device selection.
 //
 // Each parameter is identified by ONE name -- its C++ (lower_snake) field -- and
 // every other surface is a deterministic transform of it:
@@ -25,7 +31,7 @@
 //     name,  and `...ToJson` / `...FromJson` round-trip on it;
 //   * the CLI flag (lowercase,  "trailing -,  _ substituted by -",  e.g.
 //     --kv-cache-precision) is the field dashed;  the "Runtime config options"
-//     section is long-form only (with ~25 of them a single letter is no longer a
+//     section is long-form only (with ~28 of them a single letter is no longer a
 //     sensible alias).
 //   (So `num_requests` is NOT a field:  the canonical PERFORMANCE_HINT_NUM_REQUESTS
 //    maps to the field `performance_hint_num_requests`,  keeping the field ==
@@ -57,44 +63,43 @@ namespace config {
 // The runtime knobs, in *alphabetical field order* (the field below IS the
 // lower-cased OpenVINO property name,  so reading the field names top to bottom
 // reads the properties top to bottom),  each std::optional.  The comment to the
-// right of each is the OpenVINO property key toProperties() emits under it,  with
-// the value OpenVINO accepts (a hint / enum field is a token;  a *precision is a
-// element type name like f16 / f32;  the numbers and booleans are their value).
+// right of each is a one-line echo of the --help text in model_runtime_config.cpp
+// (runtimeOptionsDesc):  the property key toProperties() emits it under,  with a
+// short paraphrase of the value OpenVINO accepts (a hint / enum field is a token;
+// a *precision is an element type name like f16 / f32;  the numbers and booleans
+// are their value).
 struct ModelRuntimeConfig {
-  // The 29 fields in *alphabetical order by field name* (the field is also the
+  // The 28 fields in *alphabetical order by field name* (the field is also the
   // lower-cased property name,  so top-to-bottom is also the property order);
-  // std types are interleaved,  not grouped,  to keep the alphabet strict.  Each
-  // field's comment is the OpenVINO property key toProperties() emits it under,
-  // with the value OpenVINO accepts.
-  std::optional<double>       activations_scale_factor;   // "ACTIVATIONS_SCALE_FACTOR"  :  NPU activation scaling factor
-  std::optional<std::string> attention_backend;          // "ATTENTION_BACKEND"         :  NAIVE / PAGED / SDPA
-  std::optional<std::size_t> auto_batch_timeout;         // "AUTO_BATCH_TIMEOUT"
-  std::optional<std::string> cache_dir;                   // "CACHE_DIR"                 :  the OpenVINO compile cache dir
-  std::optional<std::string> cache_mode;                 // "CACHE_MODE"                :  OPTIMIZE_SIZE / OPTIMIZE_SPEED
-  std::optional<std::int32_t> compilation_num_threads;   // "COMPILATION_NUM_THREADS"   :  may be negative;  0 = all cores
-  std::optional<std::string> device_id;                  // "DEVICE_ID"                 :  a device selector
-  std::optional<bool>        enable_cpu_pinning;          // "ENABLE_CPU_PINNING"
-  std::optional<bool>        enable_cpu_reservation;      // "ENABLE_CPU_RESERVATION"
-  std::optional<bool>        enable_hyper_threading;      // "ENABLE_HYPER_THREADING"
-  std::optional<bool>        enable_mmap;                 // "ENABLE_MMAP"
-  std::optional<bool>        enable_weightless;           // "ENABLE_WEIGHTLESS"
-  std::optional<std::string> execution_mode_hint;        // "EXECUTION_MODE_HINT"       :  PERFORMANCE / ACCURACY
-  std::optional<bool>        force_tbb_terminate;         // "FORCE_TBB_TERMINATE"
-  std::optional<std::int32_t> inference_num_threads;     // "INFERENCE_NUM_THREADS"     :  may be negative;  0 = all cores
-  std::optional<std::string> inference_precision_hint;   // "INFERENCE_PRECISION_HINT"  :  a precision (f16 / f32 / ...)
-  std::optional<std::size_t> key_cache_group_size;       // "KEY_CACHE_GROUP_SIZE"
-  std::optional<std::string> key_cache_precision;        // "KEY_CACHE_PRECISION"       :  a precision (bf16 / f16 / f32 / ...)
-  std::optional<std::string> kv_cache_precision;         // "KV_CACHE_PRECISION"        :  a precision (bf16 / f16 / f32 / ...)
-  std::optional<std::string> log_level;                  // "LOG_LEVEL"                 :  LOG_NONE / LOG_ERROR / LOG_WARNING / LOG_INFO / LOG_DEBUG / LOG_TRACE
-  std::optional<std::string> model_priority;             // "MODEL_PRIORITY"            :  LOW / MEDIUM / HIGH / DEFAULT
-  std::optional<std::size_t> num_streams;                // "NUM_STREAMS"
-  std::optional<std::string> performance_hint;           // "PERFORMANCE_HINT"          :  LATENCY / THROUGHPUT / CUMULATIVE_THROUGHPUT
-  std::optional<std::size_t> performance_hint_num_requests; // "PERFORMANCE_HINT_NUM_REQUESTS"
-  std::optional<std::string> scheduling_core_type;       // "SCHEDULING_CORE_TYPE"      :  ANY_CORE / PCORE_ONLY / ECORE_ONLY
-  std::optional<std::size_t> value_cache_group_size;     // "VALUE_CACHE_GROUP_SIZE"
-  std::optional<std::string> value_cache_precision;      // "VALUE_CACHE_PRECISION"     :  a precision (bf16 / f16 / f32 / ...)
-  std::optional<std::string> weights_path;               // "WEIGHTS_PATH"              :  a weights path
-  std::optional<std::string> workload_type;              // "WORKLOAD_TYPE"             :  e.g. GENERATION
+  // std types are interleaved,  not grouped,  to keep the alphabet strict.
+  std::optional<double>       activations_scale_factor;    // ACTIVATIONS_SCALE_FACTOR : factor easing f16 activation overflow
+  std::optional<std::string> attention_backend;           // ATTENTION_BACKEND        : PA (paged, continuous batching) / SDPA (default)
+  std::optional<std::size_t> auto_batch_timeout;          // AUTO_BATCH_TIMEOUT        : ms to await more inputs before flushing a batch
+  std::optional<std::string> cache_dir;                   // CACHE_DIR                : plugin compile/blob cache dir (empty disables caching)
+  std::optional<std::string> cache_mode;                  // CACHE_MODE               : OPTIMIZE_SIZE (small files) / OPTIMIZE_SPEED (default)
+  std::optional<std::int32_t> compilation_num_threads;   // COMPILATION_NUM_THREADS  : max compile threads; negative / 0 = all cores
+  std::optional<bool>        enable_cpu_pinning;          // ENABLE_CPU_PINNING         : bind threads to cores (win/linux; off on macOS)
+  std::optional<bool>        enable_cpu_reservation;       // ENABLE_CPU_RESERVATION     : reserve cores from other plugins (off by default)
+  std::optional<bool>        enable_hyper_threading;       // ENABLE_HYPER_THREADING     : use CPU hyper-threads
+  std::optional<bool>        enable_mmap;                  // ENABLE_MMAP                : read the model via mmap (default on)
+  std::optional<bool>        enable_weightless;            // ENABLE_WEIGHTLESS          : weightless cache (topology cached without its weights)
+  std::optional<std::string> execution_mode_hint;         // EXECUTION_MODE_HINT        : PERFORMANCE (speed>accuracy) / ACCURACY (default)
+  std::optional<bool>        force_tbb_terminate;          // FORCE_TBB_TERMINATE        : force-terminate TBB on core destruction
+  std::optional<std::int32_t> inference_num_threads;     // INFERENCE_NUM_THREADS      : max inference threads; negative / 0 = all cores
+  std::optional<std::string> inference_precision_hint;    // INFERENCE_PRECISION_HINT   : inference element type, e.g. f16 / f32 / bf16
+  std::optional<std::size_t> key_cache_group_size;        // KEY_CACHE_GROUP_SIZE       : key-cache sub-channel quant group size; 0 = whole channel
+  std::optional<std::string> key_cache_precision;         // KEY_CACHE_PRECISION        : key-cache element type (u4 / i8 / u8 / f16 / bf16 / f32)
+  std::optional<std::string> kv_cache_precision;          // KV_CACHE_PRECISION         : umbrella KV-cache element type (bf16 / f16 / f32 / ...)
+  std::optional<std::string> log_level;                   // LOG_LEVEL                  : LOG_NONE / LOG_ERROR / LOG_WARNING / LOG_INFO / LOG_DEBUG / LOG_TRACE
+  std::optional<std::string> model_priority;              // MODEL_PRIORITY             : LOW / MEDIUM (default) / HIGH / DEFAULT
+  std::optional<std::size_t> num_streams;                 // NUM_STREAMS                : executor streams (logical partitions)
+  std::optional<std::string> performance_hint;            // PERFORMANCE_HINT           : LATENCY / THROUGHPUT / CUMULATIVE_THROUGHPUT
+  std::optional<std::size_t> performance_hint_num_requests; // PERFORMANCE_HINT_NUM_REQUESTS : in-flight requests the performance hint plans for
+  std::optional<std::string> scheduling_core_type;        // SCHEDULING_CORE_TYPE       : ANY_CORE / PCORE_ONLY / ECORE_ONLY
+  std::optional<std::size_t> value_cache_group_size;      // VALUE_CACHE_GROUP_SIZE     : value-cache sub-channel quant group size; 0 = whole channel
+  std::optional<std::string> value_cache_precision;       // VALUE_CACHE_PRECISION      : value-cache element type (u4 / u8 / f16 / bf16 / f32)
+  std::optional<std::string> weights_path;                // WEIGHTS_PATH               : weights file for a weightless cache (OPTIMIZE_SIZE)
+  std::optional<std::string> workload_type;               // WORKLOAD_TYPE              : NPU only: DEFAULT / EFFICIENT (execution priority)
 
   bool operator==(const ModelRuntimeConfig&) const = default;
 
