@@ -38,8 +38,7 @@ void expectConfigErrorContains(std::function<void()> fn, const std::string& need
 
 // A minimal, valid argument set; tests append / mutate from here.
 std::vector<std::string> validMin() {
-  return {"--model", "/opt/qwen3-8b", "--engine", "ovgenai",
-          "--model-type", "vlm", "--device", "CPU"};
+  return {"--model", "/opt/qwen3-8b", "--device", "CPU"};
 }
 std::vector<std::string> validMinAppend(std::vector<std::string> extra) {
   std::vector<std::string> v = validMin();
@@ -52,8 +51,6 @@ std::vector<std::string> validMinAppend(std::vector<std::string> extra) {
 TEST(parseLoadModel, minimalLongFlagsDerivesName) {
   auto c = parseModelLoadConfig(validMin());
   EXPECT_EQ(c.model, "/opt/qwen3-8b");
-  EXPECT_EQ(c.engine, "ovgenai");
-  EXPECT_EQ(c.model_type, "vlm");
   EXPECT_EQ(c.device, "CPU");
   // The load optionals at their defaults (cache_dir is now on the runtime
   // config,  so it is no longer a load optional):
@@ -69,10 +66,8 @@ TEST(parseLoadModel, minimalLongFlagsDerivesName) {
 
 TEST(parseLoadModel, shortAliasesMatchLong) {
   // Single-letter shorts: -m, -e, -t, -d (see config.hpp for the full map).
-  auto c = parseModelLoadConfig({"-m", "/opt/x", "-e", "openvino", "-t", "llm", "-d", "GPU"});
+  auto c = parseModelLoadConfig({"-m", "/opt/x", "-d", "GPU"});
   EXPECT_EQ(c.model, "/opt/x");
-  EXPECT_EQ(c.engine, "openvino");
-  EXPECT_EQ(c.model_type, "llm");
   EXPECT_EQ(c.device, "GPU");
 }
 
@@ -82,27 +77,32 @@ TEST(parseLoadModel, attachedForms) {
   // '-xvalue' instead: for a single-dash short, boost 1.90 keeps a leading
   // '=' in the value, so "-x=value" would decode with a literal '=' prefix
   // and then fail the enum / number validation the way a genuine typo would.
-  auto a = parseModelLoadConfig({"--model=/opt/qwen", "--engine=ovgenai",
-                                  "--model-type=vlm", "--device=GPU"});
+  auto a = parseModelLoadConfig({"--model=/opt/qwen", "--device=GPU"});
   EXPECT_EQ(a.model, "/opt/qwen");
-  EXPECT_EQ(a.engine, "ovgenai");
 
-  auto b = parseModelLoadConfig({"-m/opt/qwen", "-eovgenai", "-tvlm", "-dCPU"});
+  auto b = parseModelLoadConfig({"-m/opt/qwen", "-dCPU"});
   EXPECT_EQ(b.model, "/opt/qwen");
-  EXPECT_EQ(b.engine, "ovgenai");
 }
 
 TEST(parseLoadModel, deviceShortIsDistinctFromDraftLongs) {
   // "d" is a prefix of the long names --draft-device / --draft-model, but
   // boost matches the single-character short by exact name: -d must still land
   // on --device (not a draft option, which are long-only because of the clash).
-  auto c = parseModelLoadConfig({"-m", "/opt/qwen", "-e", "ovgenai", "-t", "llm",
-                                  "-d", "GPU",
+  auto c = parseModelLoadConfig({"-m", "/opt/qwen", "-d", "GPU",
                                   "--draft-device", "CPU",
                                   "--draft-model", "/opt/draft"});
   EXPECT_EQ(c.device, "GPU");
   EXPECT_EQ(c.draft_device, std::optional<std::string>("CPU"));
   EXPECT_EQ(c.draft_model, std::optional<std::string>("/opt/draft"));
+}
+
+TEST(parseLoadModel, badEnumsReject) {
+  // Give the bad value as the SOLE occurrence of the option; otherwise boost
+  // reports "cannot be specified more than once" for the duplicate before our
+  // finalize() can flag the bad enum value.
+  expectConfigErrorContains([] {
+    parseModelRequestConfig(validMinAppend({"--tool-call-parser", "x"}));
+  }, "must be one of");
 }
 
 TEST(parseLoadModel, draftDeviceEmptyClearsDefault) {
@@ -114,12 +114,12 @@ TEST(parseLoadModel, positionalIsModelPathFriend) {
   // A lone positional stands in for --model; --model wins if both
   // are given (the preprocessor drops the positional so boost sees a clean
   // list and doesn't report "cannot be specified more than once").
-  auto c = parseModelLoadConfig({"gnmt", "-e", "ovgenai", "-t", "llm", "-d", "CPU"});
+  auto c = parseModelLoadConfig({"gnmt", "-d", "CPU"});
   EXPECT_EQ(c.model, "gnmt");
 
   auto both = parseModelLoadConfig(
       {"--model", "/explicit/path", "positional",
-       "-e", "ovgenai", "-t", "llm", "-d", "CPU"});
+       "-d", "CPU"});
   EXPECT_EQ(both.model, "/explicit/path");  // explicit flag wins over the positional
 }
 
@@ -127,33 +127,6 @@ TEST(parseLoadModel, tooManyPositionalsError) {
   expectConfigErrorContains(
       [] { parseModelLoadConfig({"a", "b", "-e", "ovgenai", "-t", "llm", "-d", "CPU"}); },
       "positional");
-}
-
-TEST(parseLoadModel, missingRequiredReportedTogether) {
-  // Only engine is given; --model/--model-type/--device are all missing.
-  expectConfigErrorContains(
-      [] { parseModelLoadConfig({"--engine", "ovgenai"}); }, "model");
-  expectConfigErrorContains(
-      [] { parseModelLoadConfig({"--engine", "ovgenai"}); }, "model-type");
-  expectConfigErrorContains(
-      [] { parseModelLoadConfig({"--engine", "ovgenai"}); }, "device");
-}
-
-TEST(parseLoadModel, badEnumsReject) {
-  // Give the bad value as the SOLE occurrence of the option; otherwise boost
-  // reports "cannot be specified more than once" for the duplicate before our
-  // finalize() can flag the bad enum value.
-  expectConfigErrorContains([] {
-    parseModelLoadConfig({"--model", "/opt/x", "--engine", "ovgenai",
-                           "--model-type", "not-a-type", "--device", "CPU"});
-  }, "must be one of");
-  expectConfigErrorContains([] {
-    parseModelLoadConfig({"--model", "/opt/x", "--engine", "not-an-engine",
-                           "--model-type", "llm", "--device", "CPU"});
-  }, "must be one of");
-  expectConfigErrorContains([] {
-    parseModelRequestConfig(validMinAppend({"--tool-call-parser", "x"}));
-  }, "must be one of");
 }
 
 TEST(parseLoadModel, unknownLongAndShortOptionReject) {
@@ -187,7 +160,7 @@ TEST(parseLoadModel, numericCoercionAndFloor) {
   // "cannot be specified more than once"; to trigger our numeric validation
   // the bad value must be the only one for each option.
   auto rt = parseModelRequestConfig({
-      "--model", "/opt/x", "--engine", "ovgenai", "--model-type", "llm",
+      "--model", "/opt/x",
       "--device", "CPU",
       "--num-assistant-tokens", "4",
       "--assistant-confidence-threshold", "0.5"});
@@ -237,8 +210,8 @@ TEST(parseLoadModel, runtimeAndSchedulerFlagsRoundThrough) {
 
 TEST(jsonRoundTrip, fullConfig) {
   std::vector<std::string> args = {
-      "--model", "/opt/qwen3-8b-a3b", "--engine", "ovgenai", "--model-type", "llm",
-      "--device", "GPU",        "--cache-dir", "/var/ovcache",
+    "--model", "/opt/qwen3-8b-a3b", "--device", "GPU",
+    "--cache-dir", "/var/ovcache",
       "--draft-model", "/opt/draft", "--draft-device", "CPU",
       "--num-assistant-tokens", "4", "--assistant-confidence-threshold", "0.5",
       "--tool-call-parser", "qwen35",
@@ -274,12 +247,9 @@ TEST(jsonRoundTrip, adoptsAndIgnoresForeignKeys) {
   // known keys are read, the rest simply
   // ignored (not fatal).
   auto c = modelLoadConfigFromJson(
-      R"({"model":"/opt/qwen","model_type":"llm",
-          "engine":"ovgenai","device":"CPU","context_window":"auto",
+      R"({"model":"/opt/qwen","device":"CPU","context_window":"auto",
           "worker_max_respawns":3,"worker_line_limit":65536,"some_foreign_key":true})");
   EXPECT_EQ(c.model, "/opt/qwen");
-  EXPECT_EQ(c.model_type, "llm");
-  EXPECT_EQ(c.engine, "ovgenai");
   // re-serializing emits none of the dropped/foreign keys at all
   std::string js = modelLoadConfigToJson(c);
   EXPECT_EQ(js.find("context_window"), std::string::npos);
@@ -290,17 +260,17 @@ TEST(jsonRoundTrip, adoptsAndIgnoresForeignKeys) {
 
 TEST(jsonRoundTrip, derivesNameWhenUnsetAndStillRequiresRest) {
   auto c = modelLoadConfigFromJson(
-      R"({"model":"/opt/qwen3-8b-a3b/","model_type":"vlm","engine":"openvino","device":"NPU"})");
+      R"({"model":"/opt/qwen3-8b-a3b/","device":"NPU"})");
   EXPECT_EQ(c.model, "/opt/qwen3-8b-a3b/");  // path itself is kept verbatim
 
   // A model-less config is still missing-required, even in the tolerant reader.
   expectConfigErrorContains(
-      [] { modelLoadConfigFromJson(R"({"model_type":"llm","engine":"ovgenai","device":"CPU"})"); },
+      [] { modelLoadConfigFromJson(R"({"device":"CPU"})"); },
       "model");
 }
 
 TEST(jsonRoundTrip, modelPathWrongTypeRejects) {
   expectConfigErrorContains(
-      [] { modelLoadConfigFromJson(R"({"model":3,"model_type":"llm","engine":"ovgenai","device":"CPU"})"); },
+      [] { modelLoadConfigFromJson(R"({"model":3,"device":"CPU"})"); },
       "model");
 }

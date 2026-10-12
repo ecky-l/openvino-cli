@@ -23,8 +23,6 @@ ModelLoadConfig baseConfig()
 {
     ModelLoadConfig c;
     c.model  = "/opt/qwen3-8b";
-    c.model_type  = "llm";
-    c.engine      = "ovgenai";
     c.device      = "GPU";
     return c;
 }

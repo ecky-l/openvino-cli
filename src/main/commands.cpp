@@ -230,12 +230,10 @@ int runPipelineStub(const std::string& name, const std::string& desc,
       throw config::rephraseBoost(e);
     }
 
-    // Mirror the load config's required set (model / engine / model-type /
-    // device): a worker or one-shot should not even go up without them.
+    // Mirror the load config's required set (model / device):
+    // a worker or one-shot should not even go up without them.
     std::vector<std::string> missing;
     if (!vm.count("model"))       missing.push_back("--model");
-    if (!vm.count("engine"))      missing.push_back("--engine");
-    if (!vm.count("model-type"))  missing.push_back("--model-type");
     if (!vm.count("device"))      missing.push_back("--device");
     if (!missing.empty())
       throw config::ConfigError("missing required load option(s): "
@@ -352,8 +350,8 @@ std::string SubcommandTable::usage(const std::string& prog) const {
   renderCategory(os, "Helper subcommands", helperSubs);
 
   os << "EXAMPLES:\n";
-  os << "  " << prog << " llm --model ./model --engine ovgenai --model-type llm --device CPU\n";
-  os << "  echo 'hi' | " << prog << " llm --worker --model ./model --engine ovgenai --device CPU\n";
+  os << "  " << prog << " llm --model ./model --device CPU\n";
+  os << "  echo 'hi' | " << prog << " llm --worker --model ./model --device CPU\n";
   return os.str();
 }
 

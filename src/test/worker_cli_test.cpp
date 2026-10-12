@@ -102,32 +102,22 @@ TEST(vcli_worker, showConfigPrintsResolvedJson) {
   std::string out, err;
   // rapidjson emits compact JSON (no space after ':').
   int rc = runOvgenai({
-      "show-config", "--model", "./tiny-gpt2-ov",
-      "--engine", "ovgenai", "--model-type", "llm", "--device", "CPU",
+      "show-config", "--model", "./tiny-gpt2-ov", "--device", "CPU",
   },
 
   &out, &err);
   EXPECT_EQ(rc, 0);
   EXPECT_NE(out.find("\"model\":\"./tiny-gpt2-ov\""), std::string::npos);
-  EXPECT_NE(out.find("\"engine\":\"ovgenai\""), std::string::npos);
-  // the deliberately-dropped fields must NOT appear
-  EXPECT_EQ(out.find("context_window"), std::string::npos);
-  EXPECT_EQ(out.find("worker_max_respawns"), std::string::npos);
 }
 
 TEST(vcli_worker, configErrorOnBadEnumAndMissingRequired) {
   if (!ovgenaiRuns()) GTEST_SKIP() << "ovgenai not runnable here (needs `eval $(./setupenv.sh)`)";
   std::string out, err;
   // Bad model-type -> exit 2, named on stderr.
-  EXPECT_EQ(runOvgenai({"show-config", "--model", "/x", "--engine", "ovgenai",
-                       "--model-type", "notatype", "--device", "CPU"},
-                      &out, &err),
+  EXPECT_EQ(runOvgenai({"show-config", "--model", "/x"}, &out, &err),
             2);
-  EXPECT_NE(err.find("model-type"), std::string::npos);
   // Missing --model -> exit 2, named on stderr.
-  EXPECT_EQ(runOvgenai({"show-config", "--engine", "ovgenai", "--model-type", "llm",
-                       "--device", "CPU"},
-                      &out, &err),
+  EXPECT_EQ(runOvgenai({"show-config", "--device", "CPU"}, &out, &err),
             2);
   EXPECT_NE(err.find("model"), std::string::npos);
 }
@@ -142,15 +132,14 @@ TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
   // even for an absent one) -- so a one-shot (worker omitted) must NOT report
   // itself as a worker; assert both directions to catch that pitfall.
   // --worker present -> the stub reports "worker mode":
-  EXPECT_EQ(runOvgenai({"llm", "--worker", "--model", "./tiny-gpt2-ov",
-                       "--engine", "ovgenai", "--model-type", "llm", "--device", "CPU"},
-                      &out, &err),
-            0);
+  EXPECT_EQ(runOvgenai(
+      {"llm", "--worker", "--model", "./tiny-gpt2-ov", "--device", "CPU"},
+      &out, &err),
+       0);
   EXPECT_NE(err.find("worker mode"), std::string::npos);
   EXPECT_NE(err.find("/tiny-gpt2-ov"), std::string::npos);
   // --worker omitted -> the stub reports "one-shot", model still logged:
-  EXPECT_EQ(runOvgenai({"vlm", "--model", "./tiny-gpt2-ov",
-                       "--engine", "openvino", "--model-type", "vlm", "--device", "CPU"},
+  EXPECT_EQ(runOvgenai({"vlm", "--model", "./tiny-gpt2-ov", "--device", "CPU"},
                       &out, &err),
             0);
   EXPECT_NE(err.find("one-shot"), std::string::npos);

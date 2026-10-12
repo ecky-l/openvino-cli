@@ -36,8 +36,6 @@ namespace config {
 struct ModelLoadConfig {
   // --- required: there is exactly one model ---
   std::string model;  // dir of the OpenVINO IR model; the model's identity
-  std::string model_type;  // one of kModelTypes (defined in model_load_config.cpp)
-  std::string engine;      // one of kEngines (defined in model_load_config.cpp)
   std::string device;      // OpenVINO device string, e.g. "CPU", "GPU", "NPU"
 
   // --- optional load knobs (CACHE_DIR / runtime_config are now the first-class

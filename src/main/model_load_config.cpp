@@ -28,36 +28,19 @@ namespace ovgenai {
 namespace config {
 namespace {
 
-// --- The enums (the accepted member strings) --------
-const std::vector<std::string> kEngines = {"optimum", "ovgenai", "openvino"};
-const std::vector<std::string> kModelTypes = {
-    "llm",         "vlm",         "whisper",
-    "qwen3_asr",   "kokoro",      "qwen3_tts_custom_voice",
-    "qwen3_tts_voice_design",     "qwen3_tts_voice_clone",
-    "emb",         "rerank"};
-
 // The one required / enum / derive pass BOTH entry points share: after either
 // parser has populated a ModelLoadConfig (strings + optionals), finalize() fills
 // the one it derives and validates the other required / enum fields.
 //   * model  -- derived by *neither*; the required flag. The load_config JSON
 //             reader sets it first if the LOAD message named it; the CLI leaves it
 //             empty -> finalize() reports it missing.
-//   * engine, model_type, device -- validated against the k-enums.
+//   * device -- validated against the k-enums.
 void finalize(ModelLoadConfig& cfg) {
   std::vector<std::string> missing;
   if (cfg.model.empty()) missing.push_back("--model");
-  if (cfg.engine.empty()) missing.push_back("--engine");
-  if (cfg.model_type.empty()) missing.push_back("--model-type");
   if (cfg.device.empty()) missing.push_back("--device");
   if (!missing.empty())
     throw ConfigError("missing required load option(s): " + joinList(missing, ", "));
-
-  if (!inSet(cfg.engine, kEngines))
-    throw ConfigError("--engine '" + cfg.engine + "' must be one of: " +
-                        joinList(kEngines, ", "));
-  if (!inSet(cfg.model_type, kModelTypes))
-    throw ConfigError("--model-type '" + cfg.model_type + "' must be one of: " +
-                        joinList(kModelTypes, ", "));
 }
 
 // (The former free-form `runtime_config` blob reader lived here;  that blob is
@@ -84,10 +67,6 @@ po::options_description ModelLoadConfig::loadOptionsDesc() {
     // --- required ---
     ("model,m", po::value<std::string>(),
         "Dir of the OpenVINO IR model; the model's identity (required)")
-    ("engine,e", po::value<std::string>(),
-        "Loader: optimum, ovgenai or openvino (required)")
-    ("model-type,t", po::value<std::string>(),
-        "Pipeline: llm, vlm, whisper, qwen3_asr, kokoro, qwen3_tts_*, emb or rerank (required)")
     ("device,d", po::value<std::string>(),
         "OpenVINO device, e.g. CPU, GPU, NPU (required)")
     // --- optional model-load knobs (CACHE_DIR is now ModelRuntimeConfig) ---
@@ -160,8 +139,6 @@ ModelLoadConfig parseModelLoadConfig(const std::vector<std::string>& args) {
   // not accessed here.
   ModelLoadConfig cfg;  // strings and optionals at their struct defaults
   if (vm.count("model")) cfg.model = vm["model"].as<std::string>();
-  if (vm.count("engine"))     cfg.engine     = vm["engine"].as<std::string>();
-  if (vm.count("model-type")) cfg.model_type = vm["model-type"].as<std::string>();
   if (vm.count("device"))     cfg.device     = vm["device"].as<std::string>();
   if (vm.count("draft-model")) {
     const std::string v = vm["draft-model"].as<std::string>();
@@ -202,12 +179,6 @@ ModelLoadConfig modelLoadConfigFromJson(const std::string& json) {
     if (k == "model") {
       if (v.IsString()) cfg.model = v.GetString();
       else if (!v.IsNull()) throw ConfigError("load_config.model: expected a string");
-    } else if (k == "model_type") {
-      if (v.IsString()) cfg.model_type = v.GetString();
-      else if (!v.IsNull()) throw ConfigError("load_config.model_type: expected a string");
-    } else if (k == "engine") {
-      if (v.IsString()) cfg.engine = v.GetString();
-      else if (!v.IsNull()) throw ConfigError("load_config.engine: expected a string");
     } else if (k == "device") {
       if (v.IsString()) cfg.device = v.GetString();
       else if (!v.IsNull()) throw ConfigError("load_config.device: expected a string");
@@ -249,8 +220,6 @@ std::string modelLoadConfigToJson(const ModelLoadConfig& c) {
     out.AddMember(k, v, a);
   };
   addStr("model", c.model);
-  addStr("model_type", c.model_type);
-  addStr("engine", c.engine);
   addStr("device", c.device);
   // (The former "runtime_config" key was a free-form blob here;  it is now the
   //  ModelRuntimeConfig's own "runtime_config" section in show-config.)
@@ -270,8 +239,7 @@ std::string modelLoadConfigToJson(const ModelLoadConfig& c) {
 // A single-line human summary (for logging what resolved).
 std::string describeConfig(const ModelLoadConfig& c) {
   std::ostringstream os;
-  os << "model '" << "' [" << c.model_type << ", " << c.engine << " @ "
-     << c.device << "] " << c.model;
+  os << "model '" << "' [" << " @ " << c.device << "] " << c.model;
   if (c.draft_model)
     os << "; draft '" << *c.draft_model << "' on "
        << (c.draft_device ? *c.draft_device : "CPU");
