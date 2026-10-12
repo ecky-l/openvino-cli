@@ -257,16 +257,14 @@ ModelLoadConfig modelLoadConfigFromJson(const std::string& json) {
 std::string modelLoadConfigToJson(const ModelLoadConfig& c) {
   rapidjson::Document out(rapidjson::kObjectType);
   auto& a = out.GetAllocator();
+  // A key is emitted only when its field actually carries a value: an empty
+  // string is treated as "not set" (the wire reader reads an absent / empty
+  // string the same way as a JSON null), so an empty key is dropped from the
+  // output instead of showing up as "".
   auto addStr = [&](const char* key, const std::string& s) {
+    if (s.empty()) return;
     rapidjson::Value k(key, a);
     rapidjson::Value v(s.c_str(), s.size(), a);
-    out.AddMember(k, v, a);
-  };
-  // Emit a null member (no numeric model-load fields remain; kept for the
-  // optional string fields that fall back to null).
-  auto addNull = [&](const char* key) {
-    rapidjson::Value k(key, a);
-    rapidjson::Value v(rapidjson::kNullType);
     out.AddMember(k, v, a);
   };
   auto addObject = [&](const char* key, const std::string& json) {
@@ -285,12 +283,13 @@ std::string modelLoadConfigToJson(const ModelLoadConfig& c) {
   addStr("engine", c.engine);
   addStr("device", c.device);
   addObject("runtime_config", c.runtime_config_json);
-  if (c.cache_dir) addStr("cache_dir", *c.cache_dir);
-  else addNull("cache_dir");
-  if (c.draft_model) addStr("draft_model", *c.draft_model);
-  else addNull("draft_model");
-  if (c.draft_device) addStr("draft_device", *c.draft_device);
-  else addNull("draft_device");
+  // Optional model-load knobs: omit the key entirely when it is not set
+  // (nullopt, or an empty string) -- no "null" placeholders in the output.
+  // draft_device's "CPU" struct default is a real value, so a model with no
+  // draft still shows it, just as max_tokens keeps its 16384 default.
+  if (c.cache_dir && !c.cache_dir->empty()) addStr("cache_dir", *c.cache_dir);
+  if (c.draft_model && !c.draft_model->empty()) addStr("draft_model", *c.draft_model);
+  if (c.draft_device && !c.draft_device->empty()) addStr("draft_device", *c.draft_device);
 
   rapidjson::StringBuffer sb;
   rapidjson::Writer<rapidjson::StringBuffer> w(sb);

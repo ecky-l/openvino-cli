@@ -287,39 +287,36 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
     rapidjson::Value val(v.c_str(), v.size(), a);
     out.AddMember(k, val, a);
   };
-  auto addNull   = [&](const char* key) {
-    rapidjson::Value k(key, a);
-    out.AddMember(k, rapidjson::Value(rapidjson::kNullType), a);
-  };
-
-  // Non-optional (always emit, even at default — matches pydantic non-Option)
+  // Non-optional fields carry a real default (max_tokens / temperature /
+  // top_k / top_p / repetition_penalty), so they are always emitted -- a
+  // key that has a default value is *set*, and the output keeps that default
+  // even when the request did not ask for it (matches pydantic's non-Option
+  // fields; e.g. ModelRequestConfig::max_tokens = 16384).
   addInt("max_tokens",         c.max_tokens);
   addDouble("temperature",     c.temperature);
   addInt("top_k",             c.top_k);
   addDouble("top_p",           c.top_p);
   addDouble("repetition_penalty", c.repetition_penalty);
-  // Optional (null if nullopt)
+  // Optional generation knobs: a not-set (nullopt) key is omitted entirely
+  // (no "null" placeholder) -- a key appears only when the request sets it.
+  // An explicitly supplied 0 / false is a *set* value and is still emitted.
   if (c.seed.has_value()) addInt("seed", *c.seed);
-  else addNull("seed");
   if (c.frequency_penalty.has_value()) addDouble("frequency_penalty", *c.frequency_penalty);
-  else addNull("frequency_penalty");
   if (c.presence_penalty.has_value()) addDouble("presence_penalty", *c.presence_penalty);
-  else addNull("presence_penalty");
   if (c.num_assistant_tokens.has_value()) addInt("num_assistant_tokens", *c.num_assistant_tokens);
-  else addNull("num_assistant_tokens");
   if (c.assistant_confidence_threshold.has_value())
     addDouble("assistant_confidence_threshold", *c.assistant_confidence_threshold);
-  else addNull("assistant_confidence_threshold");
-  if (c.tool_call_parser) addStr("tool_call_parser", *c.tool_call_parser);
-  else addNull("tool_call_parser");
-  if (c.chat_template_kwargs) {
+  // String optionals: omit when unset (nullopt, or an empty string).
+  if (c.tool_call_parser && !c.tool_call_parser->empty())
+    addStr("tool_call_parser", *c.tool_call_parser);
+  if (c.chat_template_kwargs && !c.chat_template_kwargs->empty()) {
     rapidjson::Document tmp;
     rapidjson::Value node;
     if (!tmp.Parse<0>(c.chat_template_kwargs->c_str()).HasParseError())
       node.CopyFrom(tmp, a);
     else node.SetObject();
     out.AddMember(rapidjson::Value("chat_template_kwargs", a), std::move(node), a);
-  } else addNull("chat_template_kwargs");
+  }
 
   rapidjson::StringBuffer sb;
   rapidjson::Writer<rapidjson::StringBuffer> w(sb);
