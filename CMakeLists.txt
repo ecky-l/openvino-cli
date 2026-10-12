@@ -1,11 +1,15 @@
 # ovgenai -- frontend cli tool for openvino/openvino.genai interference
 #
-# One binary, two front-ends sharing an engine core (see docs/design.md):
-#   ovgenai worker <model>   long-lived line-JSON protocol (stdin/out); the drop-in
-#                           the supervisor respawns; config arrives in the LOAD
-#                           message, process knobs in the environment.
-#   ovgenai run ...          one-shot; self-configures from file/flags/env, reads one
-#                           request (base64 input for now), writes the response, exits.
+# One binary whose subcommand surface (see src/main/commands.{hpp,cpp}) is one
+# entry per OpenVINO.GenAI C++ pipeline -- llm / vlm / whisper / asr / tts / omni
+# / embedding / text-embedding / rerank / the image- and video-generation
+# pipelines -- plus the `show-config` helper, each rendered by
+# boost::program_options as two categories in `ovgenai --help`
+# (Pipeline subcommands / Helper subcommands). Every pipeline subcommand also
+# takes a valueless --worker switch for the long-lived piped worker form -- a
+# subprocess that speaks a line-JSON protocol; omit it for a one-shot run.
+# This phase is the infrastructure:
+# the per-pipeline bodies arrive later, one at a time.
 cmake_minimum_required(VERSION 3.28)
 
 project(ovgenai VERSION 0.1.0 LANGUAGES CXX)
@@ -106,5 +110,5 @@ if(OVGENAI_BUILD_TESTS)
     DISCOVERY_MODE POST_BUILD
     PROPERTIES
       TIMEOUT 120
-      ENVIRONMENT "OPENARC_WORKER_LOGFILE_STUB=/tmp/ovgenai-integration-worker.log")
+      ENVIRONMENT "OVGENAI_WORKER_LOGFILE_STUB=/tmp/ovgenai-integration-worker.log")
 endif()

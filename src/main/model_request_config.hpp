@@ -1,7 +1,7 @@
 // --- Per-request generation config ------------------------------------------
 //
-// For ovgenai run:  populated from CLI flags (parseModelRequestConfig).
-// For ovgenai worker (future):  populated from a protocol command per request.
+// For every pipeline subcommand:  populated from CLI flags (parseModelRequestConfig).
+// For a `--worker`-mode pipeline (future):  populated from a protocol command per request.
 // Maps the per-request generation knobs; the JSON round-trip uses snake_case
 // keys (see modelRequestConfigFromJson below), so the wire form is stable.
 //
@@ -59,7 +59,7 @@ struct ModelRequestConfig {
   static std::string usage();
 };
 
-// Parses the per-request generation config (for `ovgenai run`) via boost over the
+// Parses the per-request generation config (for every subcommand) via boost over the
 // full argv (its section plus the load + runtime + scheduler sections the other
 // classes own, so the flags a caller also passes are "known", not "unknown
 // option"); only the generation-config fields are read. Unknown/missing flags

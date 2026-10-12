@@ -132,20 +132,28 @@ TEST(vcli_worker, configErrorOnBadEnumAndMissingRequired) {
   EXPECT_NE(err.find("model"), std::string::npos);
 }
 
-TEST(vcli_worker, workerAndRunResolveAndExitZero) {
+TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
   if (!ovgenaiRuns()) GTEST_SKIP() << "ovgenai not runnable here (needs `eval $(./setupenv.sh)`)";
   std::string out, err;
-  // Both consume the identical shared load-model surface and (this phase) exit 0
-  // after resolving it, having reported to stderr.
-  EXPECT_EQ(runOvgenai({"worker", "--model", "./tiny-gpt2-ov",
-                       "--engine", "ovgenai", "--model-type", "vlm", "--device", "CPU"},
+  // Every pipeline subcommand consumes the identical shared load-model surface
+  // and (this phase) exits 0 after resolving it, having reported the model to
+  // stderr.  --worker must flip the reported mode -- and it is a *bound* bool,
+  // not the notify-defaulted variables_map (which would read a "present" flag
+  // even for an absent one) -- so a one-shot (worker omitted) must NOT report
+  // itself as a worker; assert both directions to catch that pitfall.
+  // --worker present -> the stub reports "worker mode":
+  EXPECT_EQ(runOvgenai({"llm", "--worker", "--model", "./tiny-gpt2-ov",
+                       "--engine", "ovgenai", "--model-type", "llm", "--device", "CPU"},
                       &out, &err),
             0);
-  EXPECT_EQ(runOvgenai({"run", "--model", "./tiny-gpt2-ov",
-                       "--engine", "openvino", "--model-type", "emb", "--device", "CPU"},
+  EXPECT_NE(err.find("worker mode"), std::string::npos);
+  EXPECT_NE(err.find("/tiny-gpt2-ov"), std::string::npos);
+  // --worker omitted -> the stub reports "one-shot", model still logged:
+  EXPECT_EQ(runOvgenai({"vlm", "--model", "./tiny-gpt2-ov",
+                       "--engine", "openvino", "--model-type", "vlm", "--device", "CPU"},
                       &out, &err),
             0);
-  // The derived name (basename of the path) is what a supervisor logs.
+  EXPECT_NE(err.find("one-shot"), std::string::npos);
   EXPECT_NE(err.find("/tiny-gpt2-ov"), std::string::npos);
 }
 

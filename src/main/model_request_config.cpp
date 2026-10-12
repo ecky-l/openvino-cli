@@ -109,7 +109,7 @@ void readDefaultSize(rapidjson::Document& doc, const char* key,
 // parseModelRequestConfig (spliced alongside the other sections).
 po::options_description ModelRequestConfig::requestOptionsDesc() {
   po::options_description s(
-      "Model request parameters (worker: per-request defaults; run: the one request)",
+      "Model request parameters (per-request generation defaults; nullopt falls back to the model-load, then the engine default)",
       kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
     ("assistant-confidence-threshold,a", po::value<std::string>(),

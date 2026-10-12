@@ -78,7 +78,7 @@ void finalize(ModelLoadConfig& cfg) {
 // + scheduler sections the other classes own).
 po::options_description ModelLoadConfig::loadOptionsDesc() {
   po::options_description s(
-      "Model load parameters (applied at model load time; shared by worker / run / show-config)",
+      "Model load parameters (applied at model load time; shared by every subcommand)",
       kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
     // --- required ---
@@ -114,8 +114,8 @@ std::string ModelLoadConfig::usage() {
 // request + scheduler sections the other classes own, so the generation /
 // scheduler flags a caller also passes are "known") for the option-name /
 // shorthand handling, then applies the domain validation (enums, numerics, JSON
-// objects) via the helpers below, producing one ModelLoadConfig that both
-// `ovgenai worker` and `ovgenai run` share.
+// objects) via the helpers below, producing one ModelLoadConfig that every
+// subcommand shares.
 ModelLoadConfig parseModelLoadConfig(const std::vector<std::string>& args) {
   const PreProcessed pp = preProcess(args);
   if (pp.positionalCount > 1) {

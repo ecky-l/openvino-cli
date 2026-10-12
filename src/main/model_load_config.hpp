@@ -3,8 +3,8 @@
 // A supervisor may also push this down a pipe via a `LOAD` protocol message
 // carrying a `load_config` JSON string. ovgenai is decoupled from that: it hosts
 // exactly ONE model, so its load config is a single-model view of the same knobs
-// and arrives from the command line (for the long-lived `worker`) and the
-// process's own defaults (for the one-shot `run`), and can round-trip as JSON so
+// and arrives from the command line (for a `--worker` pipeline run) and the
+// process's own defaults (for a one-shot pipeline run), and can round-trip as JSON so
 // the struct is a self-describing answer to "which model, what settings".
 //
 // Fields ovgenai deliberately does not expose, and why:
@@ -13,7 +13,7 @@
 //   * context_window      -- an OpenAI-/v1_models *advertising* knob the
 //     HTTP server reports; ovgenai has no such face, so nothing to advertise.
 //   * worker_line_limit   -- a *transport* knob (max bytes per line of the
-//     stdin/stdout protocol loop); only `ovgenai worker` has such a loop.
+//     stdin/stdout protocol loop); only a `--worker` pipeline has such a loop.
 // The load flag map + its single-letter alias rules live below
 // (loadOptionsDesc / usage); the argv/boost/number/JSON coercions both sections
 // share live in config.hpp.
@@ -75,7 +75,7 @@ struct ModelLoadConfig {
 
 // Parse + validate the load-model flags from `args` (the argv after the
 // subcommand name) via boost::program_options, returning the one ModelLoadConfig
-// both `ovgenai worker` and `ovgenai run` share. Parsed over all three sections (our
+// every subcommand shares. Parsed over all three sections (our
 // own plus the request + scheduler sections the sibling classes own, so the
 // flags a caller also passes are "known", not "unknown option") but only the
 // load fields are read. Throws ConfigError on a missing / unknown / invalid flag.
