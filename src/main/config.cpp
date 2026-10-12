@@ -14,6 +14,7 @@
 // all be visible here (config.hpp only forward-declares them to avoid an include
 // cycle).
 #include "model_load_config.hpp"
+#include "model_runtime_config.hpp"
 #include "model_scheduler_config.hpp"
 #include "model_request_config.hpp"
 
@@ -241,6 +242,7 @@ ConfigError rephraseBoost(const po::error& e) {
 // "request_config" keys (the three top-level sections the user asked for). The
 // output is a single compact JSON string.
 std::string showConfigJson(const ModelLoadConfig& loadConfig,
+                           const ModelRuntimeConfig& runtimeConfig,
                            const ModelSchedulerConfig& schedulerConfig,
                            const ModelRequestConfig& requestConfig) {
   rapidjson::Document out(rapidjson::kObjectType);
@@ -255,6 +257,7 @@ std::string showConfigJson(const ModelLoadConfig& loadConfig,
     out.AddMember(rapidjson::Value(key, a), node, a);
   };
   addSection("load_config",      modelLoadConfigToJson(loadConfig));
+  addSection("runtime_config",   modelRuntimeConfigToJson(runtimeConfig));
   addSection("scheduler_config",  modelSchedulerConfigToJson(schedulerConfig));
   addSection("request_config",   modelRequestConfigToJson(requestConfig));
 
@@ -278,6 +281,7 @@ std::string showConfigJson(const ModelLoadConfig& loadConfig,
 std::string combinedConfigUsage() {
   po::options_description desc;   // root, untitled (carries the --help switch)
   desc.add(ModelLoadConfig::loadOptionsDesc());
+  desc.add(ModelRuntimeConfig::runtimeOptionsDesc());
   desc.add(ModelSchedulerConfig::schedulerOptionsDesc());
   desc.add(ModelRequestConfig::requestOptionsDesc());
   desc.add_options()("help", po::bool_switch(), "Show this help message");

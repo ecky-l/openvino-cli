@@ -10,6 +10,7 @@
 //       populates it from the per-request config).
 
 #include "genai_config.hpp"
+#include "model_runtime_config.hpp"
 
 #include <cstdio>     // fprintf
 #include <filesystem>  // (used in GenAIPipelineConfig::toPipelineProperties)
@@ -19,82 +20,19 @@
 namespace ovcli {
 namespace {
 
-// (The flat scheduler_config JSON readers -- readOptionalSize / readOptionalBool
-//  -- moved out with the former GenAISchedulerConfig: they now live in
-//  model_scheduler_config.cpp as part of ModelSchedulerConfig, whose
-//  toSchedulerConfig / hasAnySet definitions moved with them.)
+// The free-form `--runtime-config` dict path used to live here (a rapidjson::Value
+// -> ov::Any converter,  a parse-json -> AnyMap reader,  a string-keyed SDPA gate).
+// It is gone:  that blob is now the first-class ModelRuntimeConfig
+// (model_runtime_config.hpp),  whose toProperties() builds the ov::AnyMap directly;
+// the gate below simply keys on that typed config's attention_backend field.
 //
-// ---------------------------------------------------------------------------
-// rapidjson::Value → ov::Any
-//
-// Convert the types that can appear in a runtime_config dict:  str →
-// std::string, int/int64 → int64_t, float(double) → float, bool → bool,
-// null → empty Any, nested dict → AnyMap, nested array → std::vector<ov::Any>.
-// An unsupported type (e.g. an empty array we choose not to recurse into) and a
-// null both fall back to an empty Any.
-// ---------------------------------------------------------------------------
-
-ov::Any convertRapidjsonToAny(const rapidjson::Value& v)
-{
-    if (v.IsNull())   return ov::Any();                        //  a JSON null  -> empty Any
-    if (v.IsBool())   return ov::Any(v.GetBool());
-    if (v.IsString()) return ov::Any(std::string(v.GetString()));
-    if (v.IsInt() || v.IsInt64() || v.IsUint())
-        return ov::Any(static_cast<int64_t>(v.GetInt64()));
-    if (v.IsNumber()) //  remaining case:  has decimal point
-        return ov::Any(static_cast<float>(v.GetDouble()));
-    if (v.IsObject()) {
-        ov::AnyMap m;
-        for (auto it = v.MemberBegin(); it != v.MemberEnd(); ++it)
-            m[it->name.GetString()] = convertRapidjsonToAny(it->value);
-        return ov::Any(std::move(m));
-    }
-    if (v.IsArray()) {
-        // Keep it simple:  a flat list of any.  A heterogenous list cannot
-        // be represented as a homogeneous std::vector<T>;  nested arrays
-        // inside runtime_config are rare enough to leave as a known limitation.
-        std::vector<ov::Any> arr;
-        arr.reserve(v.Size());
-        for (auto& el : v.GetArray()) arr.push_back(convertRapidjsonToAny(el));
-        return ov::Any(std::move(arr));
-    }
-    return ov::Any();  //  unknown type → empty
-}
-
-// Read one entry of the runtime_config JSON as an ov::Any;  on parse error
-// (the top-level is not a valid JSON object) throws ConfigError, but a
-// completely empty object simply yields no entries.
-ov::AnyMap parseRuntimeConfigToAnyMap(const std::string& json)
-{
-    rapidjson::Document doc;
-    if (doc.Parse<0>(json.c_str()).HasParseError())
-        throw ConfigError(std::string("--runtime-config: not valid JSON at position ") +
-                          std::to_string(doc.GetErrorOffset()));
-    if (!doc.IsObject())
-        throw ConfigError("--runtime-config: expected a JSON object");
-
-    ov::AnyMap m;
-    for (auto it = doc.MemberBegin(); it != doc.MemberEnd(); ++it)
-        m[it->name.GetString()] = convertRapidjsonToAny(it->value);
-    return m;
-}
-
-// ---------------------------------------------------------------------------
 // The one gate this layer enforces on an authored scheduler_config block:
-//   "if ATTENTION_BACKEND == 'SDPA' and we have an authored scheduler_config
-//    block,  drop it and warn (SDPA pipelines cannot take one)."
-// ---------------------------------------------------------------------------
-bool runtimeConfigHasSDPA(const std::string& runtime_json)
+//   "if ATTENTION_BACKEND == 'SDPA' in the runtime config and we have an authored
+//    scheduler_config block,  drop it and warn (SDPA pipelines cannot take one)."
+bool runtimeHasSDPA(const ovcli::config::ModelRuntimeConfig& runtime)
 {
-    rapidjson::Document doc;
-    if (doc.Parse<0>(runtime_json.c_str()).HasParseError())
-        return false;  //  malformed → treated as no-attention-backend,  safe default
-    if (!doc.IsObject())
-        return false;
-    auto it = doc.FindMember("ATTENTION_BACKEND");
-    if (it == doc.MemberEnd() || !it->value.IsString())
-        return false;
-    return std::string(it->value.GetString()) == "SDPA";
+    return runtime.attention_backend.has_value() &&
+           *runtime.attention_backend == "SDPA";
 }
 
 }  // namespace
@@ -173,8 +111,10 @@ ov::genai::GenerationConfig GenAIGenerationConfig::toGenerationConfig() const
 // GenAIPipelineConfig
 // ---------------------------------------------------------------------------
 
-GenAIPipelineConfig::GenAIPipelineConfig(const ModelLoadConfig& cfg, const ModelSchedulerConfig& sched)
-    : cfg_(cfg), sched_(sched)
+GenAIPipelineConfig::GenAIPipelineConfig(const ModelLoadConfig& cfg,
+                                         const ModelSchedulerConfig& sched,
+                                         const ModelRuntimeConfig& runtime)
+    : cfg_(cfg), sched_(sched), runtime_(runtime)
 {
     //  The scheduler config is a first-class input now (see the header); we no
     //  longer copy the 10 fields out of the (now scheduler-less) load config.
@@ -196,35 +136,34 @@ GenAIPipelineConfig::GenAIPipelineConfig(const ModelLoadConfig& cfg, const Model
 //    self.model = LLMPipeline(loader.model, loader.device,
 //                             **scheduler_config,  **pipeline_kwargs)
 //
-//  We fold all four sources into a single ov::AnyMap,  since the C++
+//  We fold all three sources into a single ov::AnyMap,  since the C++
 //  pipeline constructor takes one AnyMap rather than keyword arguments.
 // ---------------------------------------------------------------------------
 ov::AnyMap GenAIPipelineConfig::toPipelineProperties() const
 {
-    //  (1)  runtime_config → ov::Any per entry
-    ov::AnyMap props = parseRuntimeConfigToAnyMap(cfg_.runtime_config_json);
+    //  (1)  the runtime config's typed OpenVINO properties (runtime_.toProperties());
+    ov::AnyMap props = runtime_.toProperties();
 
-    //  (2)  CACHE_DIR from cache_dir  (overrides any stale CACHE_DIR in runtime_config)
-    if (cfg_.cache_dir.has_value() && !cfg_.cache_dir->empty())
-        props["CACHE_DIR"] = ov::Any(std::string(*cfg_.cache_dir));
-
+    //  (2)  scheduler_config,  when authored AND the backend is not SDPA
+    //       (the (1) runtime.toProperties() already folds in CACHE_DIR, now a
+    //       first-class runtime field  --  so there is no separate step for it)
     //  (3)  scheduler_config,  when authored AND the backend is not SDPA
-    if (schedAuthored_ && !runtimeConfigHasSDPA(cfg_.runtime_config_json)) {
+    if (schedAuthored_ && !runtimeHasSDPA(runtime_)) {
         auto sc = sched_.toSchedulerConfig();
         props["scheduler_config"] = ov::Any(sc);
-    } else if (schedAuthored_ && runtimeConfigHasSDPA(cfg_.runtime_config_json)) {
+    } else if (schedAuthored_ && runtimeHasSDPA(runtime_)) {
         std::fprintf(stderr,
                      "ovcli: refusing to set scheduler_config: model '%s' uses "
                      "ATTENTION_BACKEND=SDPA which cannot accept one\n",
                      cfg_.model.c_str());
     }
 
-    //  (4)  draft_model,  when present
+    //  (3)  draft_model,  when present
     if (cfg_.draft_model.has_value() && !cfg_.draft_model->empty()) {
         try {
             ov::AnyMap draftProps;
-            if (cfg_.cache_dir.has_value() && !cfg_.cache_dir->empty())
-                draftProps["CACHE_DIR"] = ov::Any(std::string(*cfg_.cache_dir));
+            if (runtime_.cache_dir.has_value() && !runtime_.cache_dir->empty())
+                draftProps["CACHE_DIR"] = ov::Any(std::string(*runtime_.cache_dir));
             const std::string dev =
                 cfg_.draft_device.has_value() && !cfg_.draft_device->empty()
                     ? *cfg_.draft_device : std::string("CPU");

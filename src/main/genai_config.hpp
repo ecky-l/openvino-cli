@@ -27,6 +27,7 @@
 // model_scheduler_config and is re-exported too.
 #include "config.hpp"
 #include "model_load_config.hpp"
+#include "model_runtime_config.hpp"
 #include "model_request_config.hpp"
 #include "model_scheduler_config.hpp"
 
@@ -42,6 +43,7 @@ namespace ovcli {
 using ovcli::config::ConfigError;
 using ovcli::config::ModelLoadConfig;
 using ovcli::config::ModelRequestConfig;
+using ovcli::config::ModelRuntimeConfig;               // the runtime config,  first-class here too
 using ovcli::config::ModelSchedulerConfig;             // absorbed the former GenAISchedulerConfig
 using ovcli::config::modelSchedulerConfigFromJson;     // its JSON reader, re-exported for the tests
 
@@ -99,17 +101,21 @@ struct GenAIGenerationConfig {
 // Note:  num_assistant_tokens / assistant_confidence_threshold are
 // per-request (ModelRequestConfig) in ovcli's design;  they do not appear
 // here.  The pipeline is configured solely by the scheduler config, the
-// runtime properties, the CACHE_DIR, and the draft model.
+// runtime properties (which now include CACHE_DIR), and the draft model.
 class GenAIPipelineConfig {
     ModelLoadConfig     cfg_;
     ModelSchedulerConfig sched_;          // the CLI / LOAD-resolved scheduler config this pipeline is built with
+    ModelRuntimeConfig   runtime_;        // the CLI / LOAD-resolved runtime properties this pipeline is built with
     bool                 schedAuthored_ = false;  // true iff sched_ hasAnySet()
 
  public:
-    //! Construct from a resolved ModelLoadConfig + the ModelSchedulerConfig that
-    //! shapes the pipeline (both parsed from the command line / a LOAD message).
-    //! schedAuthored_ is true iff sched_.hasAnySet().
-    GenAIPipelineConfig(const ModelLoadConfig& cfg, const ModelSchedulerConfig& sched);
+    //! Construct from a resolved ModelLoadConfig, the ModelSchedulerConfig that
+    //! shapes the pipeline,  and the ModelRuntimeConfig of OpenVINO Runtime
+    //! properties it is built with (the last defaulting to all-unset).  Both the
+    //! scheduler and the runtime are first-class inputs now;  schedAuthored_ is
+    //! true iff sched_.hasAnySet().
+    GenAIPipelineConfig(const ModelLoadConfig& cfg, const ModelSchedulerConfig& sched,
+                        const ModelRuntimeConfig& runtime = ModelRuntimeConfig{});
 
     //! The ov::AnyMap to pass as `properties` to the LLMPipeline / VLMPipeline
     //! constructor.  It folds four sources together:
@@ -124,8 +130,9 @@ class GenAIPipelineConfig {
     //       speculative decoding")
     ov::AnyMap toPipelineProperties() const;
 
-    const ModelLoadConfig&    loadConfig()   const { return cfg_; }
+    const ModelLoadConfig&     loadConfig()   const { return cfg_; }
     const ModelSchedulerConfig& scheduler()   const { return sched_; }
+    const ModelRuntimeConfig&  runtimeConfig() const { return runtime_; }
     bool                 schedulerAuthored() const { return schedAuthored_; }
 };
 

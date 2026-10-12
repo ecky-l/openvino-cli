@@ -27,6 +27,7 @@
 
 #include "config.hpp"                // shared parse helpers + ConfigError + showConfigJson
 #include "model_load_config.hpp"     // load model + parser / JSON round-trip / describe / usage
+#include "model_runtime_config.hpp"  // runtime config + parser / JSON round-trip / toProperties
 #include "model_scheduler_config.hpp"// scheduler config + parser / JSON round-trip / usage
 #include "model_request_config.hpp"  // request config + parser / JSON
 #include "ovcli_config.h"
@@ -135,11 +136,12 @@ int runShowConfig(const std::string& argv0, const std::vector<std::string>& args
     return 0;
   }
   try {
-    ovcli::config::ModelLoadConfig      loadCfg  = ovcli::config::parseModelLoadConfig(sa);
+    ovcli::config::ModelLoadConfig       loadCfg = ovcli::config::parseModelLoadConfig(sa);
+    ovcli::config::ModelRuntimeConfig    rtCfg   = ovcli::config::parseModelRuntimeConfig(sa);
     ovcli::config::ModelSchedulerConfig  schedCfg = ovcli::config::parseModelSchedulerConfig(sa);
     ovcli::config::ModelRequestConfig    reqCfg   = ovcli::config::parseModelRequestConfig(sa);
     std::printf("%s\n",
-                ovcli::config::showConfigJson(loadCfg, schedCfg, reqCfg).c_str());
+                ovcli::config::showConfigJson(loadCfg, rtCfg, schedCfg, reqCfg).c_str());
     return 0;
   } catch (const ovcli::config::ConfigError& e) {
     std::fprintf(stderr, "ovcli: show-config: %s\n", e.what());

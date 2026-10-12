@@ -9,8 +9,9 @@
 // parser splices them in.
 #include "model_load_config.hpp"
 #include "config.hpp"
-#include "model_request_config.hpp"    // the request section, spliced into our parse
+#include "model_runtime_config.hpp"    // the runtime section, spliced into our parse
 #include "model_scheduler_config.hpp"  // the scheduler section, spliced into our parse
+#include "model_request_config.hpp"    // the request section, spliced into our parse
 
 #include <algorithm>
 #include <sstream>
@@ -59,17 +60,10 @@ void finalize(ModelLoadConfig& cfg) {
                         joinList(kModelTypes, ", "));
 }
 
-// --- JSON blob readers (used by modelLoadConfigFromJson) --------------------
-// runtime_config default to {}; a present null is the same
-// as the default, a present non-object is an error.
-void readDefaultedObject(rapidjson::Document& doc, const char* key, std::string& out) {
-  out = "{}";
-  auto it = doc.FindMember(key);
-  if (it == doc.MemberEnd() || it->value.IsNull()) return;
-  if (!it->value.IsObject())
-    throw ConfigError(std::string("load_config.") + key + ": expected an object");
-  out = compactJsonOf(it->value);
-}
+// (The former free-form `runtime_config` blob reader lived here;  that blob is
+//  now its own first-class ModelRuntimeConfig,  so it is gone --  and the one
+//  knob that moved with it,  cache_dir,  lives there too:  ov::cache_dir is an
+//  OpenVINO Runtime property,  so it is set on the runtime side,  not here.)
 
 }  // close the anonymous namespace of model-load-only helpers
 
@@ -95,16 +89,12 @@ po::options_description ModelLoadConfig::loadOptionsDesc() {
         "Pipeline: llm, vlm, whisper, qwen3_asr, kokoro, qwen3_tts_*, emb or rerank (required)")
     ("device,d", po::value<std::string>(),
         "OpenVINO device, e.g. CPU, GPU, NPU (required)")
-    // --- optional model-load knobs ---
-    ("cache-dir,c", po::value<std::string>(),
-        "OpenVINO CACHE_DIR (relative paths resolve against --model)")
+    // --- optional model-load knobs (CACHE_DIR is now ModelRuntimeConfig) ---
     ("draft-model", po::value<std::string>(),
         "Draft model dir for speculative decoding (no short: prefix-conflicts --device)")
     ("draft-device", po::value<std::string>(),
         "Device for the draft model (default CPU; empty clears it; no short: --device conflict)")
-    // --- free-form JSON blobs ---
-    ("runtime-config,r", po::value<std::string>(),
-        "OpenVINO runtime properties as a JSON object")
+    // --- free-form JSON blob (authored;  carried verbatim) ---
     ("config-blocks,b", po::value<std::string>(),
         "Per-request default blocks (sampler_config, ...) as a JSON object");
   return s;
@@ -144,6 +134,7 @@ ModelLoadConfig parseModelLoadConfig(const std::vector<std::string>& args) {
   // read only the load fields.
   po::options_description desc;
   desc.add(ModelLoadConfig::loadOptionsDesc());
+  desc.add(ModelRuntimeConfig::runtimeOptionsDesc());
   desc.add(ModelRequestConfig::requestOptionsDesc());
   desc.add(ModelSchedulerConfig::schedulerOptionsDesc());
   desc.add_options()("help", po::bool_switch(), "Show this help message");
@@ -173,10 +164,6 @@ ModelLoadConfig parseModelLoadConfig(const std::vector<std::string>& args) {
   if (vm.count("engine"))     cfg.engine     = vm["engine"].as<std::string>();
   if (vm.count("model-type")) cfg.model_type = vm["model-type"].as<std::string>();
   if (vm.count("device"))     cfg.device     = vm["device"].as<std::string>();
-  if (vm.count("cache-dir")) {
-    const std::string v = vm["cache-dir"].as<std::string>();
-    if (!v.empty()) cfg.cache_dir = v;
-  }
   if (vm.count("draft-model")) {
     const std::string v = vm["draft-model"].as<std::string>();
     if (!v.empty()) cfg.draft_model = v;
@@ -186,10 +173,9 @@ ModelLoadConfig parseModelLoadConfig(const std::vector<std::string>& args) {
     if (v.empty()) cfg.draft_device = std::nullopt;  // "" clears the default
     else            cfg.draft_device = v;
   }
-  // --- free-form JSON blobs ---
-  if (vm.count("runtime-config"))
-    cfg.runtime_config_json = requireJsonObject(vm["runtime-config"].as<std::string>(),
-                                               "--runtime-config");
+  // (The former free-form `--runtime-config` blob is now ModelRuntimeConfig's
+  //  own typed section,  spliced into this parser above so the runtime flags
+  //  are "known" here though read by the runtime parser,  not this one.)
 
   finalize(cfg);
   return cfg;
@@ -226,10 +212,6 @@ ModelLoadConfig modelLoadConfigFromJson(const std::string& json) {
     } else if (k == "device") {
       if (v.IsString()) cfg.device = v.GetString();
       else if (!v.IsNull()) throw ConfigError("load_config.device: expected a string");
-    } else if (k == "cache_dir") {
-      if (v.IsString() && !std::string(v.GetString()).empty()) cfg.cache_dir = v.GetString();
-      else if (!v.IsNull() && !v.IsString())
-        throw ConfigError("load_config.cache_dir: expected a string");
     } else if (k == "draft_model") {
       if (v.IsString() && !std::string(v.GetString()).empty())
         cfg.draft_model = v.GetString();
@@ -242,12 +224,12 @@ ModelLoadConfig modelLoadConfigFromJson(const std::string& json) {
         else            cfg.draft_device = s;
       } else if (!v.IsNull())
         throw ConfigError("load_config.draft_device: expected a string");
-    } else if (k == "runtime_config") {
-      readDefaultedObject(doc, "runtime_config", cfg.runtime_config_json);
     }
-    // Unknown top-level keys (e.g. the not-exposed context_window /
-    // worker_max_respawns / worker_line_limit, and the now-separate
-    // scheduler_config) are silently ignored.
+    // A caller may nest a "runtime_config" object inside;  it is a foreign key
+    // from this reader's point of view now (the runtime config is its own
+    // ModelRuntimeConfig) -- like the not-exposed context_window /
+    // worker_max_respawns / worker_line_limit,  and the now-separate
+    // scheduler_config,  it is simply ignored.
   }
 
   finalize(cfg);
@@ -267,27 +249,16 @@ std::string modelLoadConfigToJson(const ModelLoadConfig& c) {
     rapidjson::Value v(s.c_str(), s.size(), a);
     out.AddMember(k, v, a);
   };
-  auto addObject = [&](const char* key, const std::string& json) {
-    rapidjson::Document tmp;
-    rapidjson::Value node;
-    if (!json.empty() && !tmp.Parse<0>(json.c_str()).HasParseError())
-      node.CopyFrom(tmp, a);
-    else
-      node.SetObject();
-    rapidjson::Value keyval(key, a);
-    out.AddMember(keyval, node, a);
-  };
-
   addStr("model", c.model);
   addStr("model_type", c.model_type);
   addStr("engine", c.engine);
   addStr("device", c.device);
-  addObject("runtime_config", c.runtime_config_json);
+  // (The former "runtime_config" key was a free-form blob here;  it is now the
+  //  ModelRuntimeConfig's own "runtime_config" section in show-config.)
   // Optional model-load knobs: omit the key entirely when it is not set
   // (nullopt, or an empty string) -- no "null" placeholders in the output.
   // draft_device's "CPU" struct default is a real value, so a model with no
   // draft still shows it, just as max_tokens keeps its 16384 default.
-  if (c.cache_dir && !c.cache_dir->empty()) addStr("cache_dir", *c.cache_dir);
   if (c.draft_model && !c.draft_model->empty()) addStr("draft_model", *c.draft_model);
   if (c.draft_device && !c.draft_device->empty()) addStr("draft_device", *c.draft_device);
 
@@ -305,7 +276,6 @@ std::string describeConfig(const ModelLoadConfig& c) {
   if (c.draft_model)
     os << "; draft '" << *c.draft_model << "' on "
        << (c.draft_device ? *c.draft_device : "CPU");
-  if (c.cache_dir) os << "; cache " << *c.cache_dir;
   return os.str();
 }
 

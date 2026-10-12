@@ -15,6 +15,7 @@
 
 #include "../main/config.hpp"
 #include "../main/model_load_config.hpp"
+#include "../main/model_runtime_config.hpp"
 #include "../main/model_scheduler_config.hpp"
 #include "../main/model_request_config.hpp"
 
@@ -54,11 +55,13 @@ TEST(parseLoadModel, minimalLongFlagsDerivesName) {
   EXPECT_EQ(c.engine, "ovgenai");
   EXPECT_EQ(c.model_type, "vlm");
   EXPECT_EQ(c.device, "CPU");
-  // optionals at their declared defaults
-  EXPECT_FALSE(c.cache_dir.has_value());
+  // The load optionals at their defaults (cache_dir is now on the runtime
+  // config,  so it is no longer a load optional):
   EXPECT_FALSE(c.draft_model.has_value());
   EXPECT_EQ(c.draft_device, std::optional<std::string>("CPU"));
-  EXPECT_EQ(c.runtime_config_json, "{}");
+  auto rt = parseModelRuntimeConfig(validMin());
+  EXPECT_FALSE(rt.cache_dir.has_value());  // cache_dir now lives on the runtime config
+  EXPECT_FALSE(rt.hasAnySet());  // runtime is its own config; minimal -> all unset
   // The scheduler is now its own config; a minimal invocation leaves it all-nullopt.
   auto sc = parseModelSchedulerConfig(validMin());
   EXPECT_FALSE(sc.hasAnySet());
@@ -205,23 +208,31 @@ TEST(parseLoadModel, numericCoercionAndFloor) {
   }, "integer");
 }
 
-TEST(parseLoadModel, jsonObjectFlagsRoundThrough) {
-  auto c = parseModelLoadConfig(validMinAppend({
-      "--runtime-config", "{\"INFERENCE_NUM_THREADS\":4}",
-      "--max-num-seqs", "2",
-      "--config-blocks",  "{\"sampler_config\":{\"temperature\":0.5}}",
+TEST(parseLoadModel, runtimeAndSchedulerFlagsRoundThrough) {
+  // The runtime flags the LOAD parser now accepts (known, not "unknown option")
+  // are read by the runtime parser;  --max-num-seqs by the scheduler parser.
+  auto rt = parseModelRuntimeConfig(validMinAppend({
+      "--kv-cache-precision", "fp16",
+      "--performance-hint-num-requests", "4",
+      "--enable-cpu-pinning", "true",
   }));
-  EXPECT_EQ(c.runtime_config_json, "{\"INFERENCE_NUM_THREADS\":4}");
-  // --max-num-seqs is a scheduler flag now: read it via the scheduler config.
+  ASSERT_TRUE(rt.kv_cache_precision.has_value());
+  EXPECT_EQ(*rt.kv_cache_precision, std::string("fp16"));
+  ASSERT_TRUE(rt.performance_hint_num_requests.has_value());
+  EXPECT_EQ(*rt.performance_hint_num_requests, std::size_t(4));
+  ASSERT_TRUE(rt.enable_cpu_pinning.has_value());
+  EXPECT_EQ(*rt.enable_cpu_pinning, bool(true));
+
   auto sc = parseModelSchedulerConfig(validMinAppend({"--max-num-seqs", "2"}));
   ASSERT_TRUE(sc.max_num_seqs.has_value());
   EXPECT_EQ(*sc.max_num_seqs, std::size_t(2));
 
-  // A non-object JSON value where an object is required is rejected.
-  expectConfigErrorContains([] { parseModelLoadConfig(validMinAppend({"--runtime-config", "[1,2]"})); },
-                            "object");
-  expectConfigErrorContains([] { parseModelLoadConfig(validMinAppend({"--runtime-config", "nope"})); },
-                            "valid JSON");
+  // A hint value outside OpenVINO's accepted set is rejected (the SDPA-vs-paged
+  // gate elsewhere keys on attention_backend;  a bad performance-hint is the
+  // clearest "must be one of" the enum validator can throw).
+  expectConfigErrorContains(
+      [] { parseModelRuntimeConfig(validMinAppend({"--performance-hint", "nope"})); },
+      "must be one of");
 }
 
 TEST(jsonRoundTrip, fullConfig) {
@@ -231,18 +242,23 @@ TEST(jsonRoundTrip, fullConfig) {
       "--draft-model", "/opt/draft", "--draft-device", "CPU",
       "--num-assistant-tokens", "4", "--assistant-confidence-threshold", "0.5",
       "--tool-call-parser", "qwen35",
-      "--runtime-config", "{\"INFERENCE_NUM_THREADS\":4}",
+      "--kv-cache-precision", "bf16",
       "--max-num-seqs", "2",
       "--config-blocks",    "{\"sampler_config\":{\"temperature\":0.5}}",
   };
   // Each sibling config parses the same arg list, reading only its own section.
   auto load  = parseModelLoadConfig(args);
+  auto rt    = parseModelRuntimeConfig(args);
   auto sched = parseModelSchedulerConfig(args);
   auto req   = parseModelRequestConfig(args);
   // Round-trip each through its own JSON and assert equality.
   EXPECT_EQ(load,  modelLoadConfigFromJson(modelLoadConfigToJson(load)));
+  EXPECT_EQ(rt,    modelRuntimeConfigFromJson(modelRuntimeConfigToJson(rt)));
   EXPECT_EQ(sched, modelSchedulerConfigFromJson(modelSchedulerConfigToJson(sched)));
   EXPECT_EQ(req,   modelRequestConfigFromJson(modelRequestConfigToJson(req)));
+  // and the runtime config actually captured the one set field
+  ASSERT_TRUE(rt.kv_cache_precision.has_value());
+  EXPECT_EQ(*rt.kv_cache_precision, std::string("bf16"));
   // the emitted load JSON must not carry the three fields ovcli deliberately dropped
   std::string js = modelLoadConfigToJson(load);
   EXPECT_EQ(js.find("context_window"), std::string::npos);

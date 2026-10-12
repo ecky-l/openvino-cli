@@ -40,8 +40,8 @@ struct ModelLoadConfig {
   std::string engine;      // one of kEngines (defined in model_load_config.cpp)
   std::string device;      // OpenVINO device string, e.g. "CPU", "GPU", "NPU"
 
-  // --- optional load knobs ---
-  std::optional<std::string> cache_dir;               // OpenVINO CACHE_DIR path
+  // --- optional load knobs (CACHE_DIR / runtime_config are now the first-class
+  //  ModelRuntimeConfig,  not load knobs) ---
   std::optional<std::string> draft_model;        // speculative-decoding draft
   std::optional<std::string> draft_device = std::string("CPU");  // default "CPU"
 
@@ -49,9 +49,9 @@ struct ModelLoadConfig {
   // live in ModelSchedulerConfig (model_scheduler_config.hpp) -- the pipeline
   // gets them through that class instead of off the load config.
 
-  // --- free-form JSON blobs (authored; carried verbatim) ---
-  // "{}" means "the empty object" for the two that default to {}.
-  std::string runtime_config_json = "{}";     // OpenVINO runtime properties
+  // (The former free-form `runtime_config` JSON blob is now its own first-class
+  //  class -- ModelRuntimeConfig in model_runtime_config.hpp -- which owns the
+  //  typed,  validated runtime properties instead of a verbatim dict.)
 
   bool operator==(const ModelLoadConfig&) const = default;
 

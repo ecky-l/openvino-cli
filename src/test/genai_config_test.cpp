@@ -137,8 +137,10 @@ TEST(genai_scheduler_config, toSchedulerConfig_forwards_0_cache_interval_when_pr
 TEST(genai_pipeline_config, runtime_config_entries_pass_through)
 {
     ModelLoadConfig c = baseConfig();
-    c.runtime_config_json = R"({"INFERENCE_NUM_THREADS":4,"PERFORMANCE_HINT":"LATENCY"})";
-    GenAIPipelineConfig pc(c, ModelSchedulerConfig{});
+    ModelRuntimeConfig rt;
+    rt.inference_num_threads = 4;
+    rt.performance_hint      = std::string("LATENCY");
+    GenAIPipelineConfig pc(c, ModelSchedulerConfig{}, rt);
     ov::AnyMap props = pc.toPipelineProperties();
     ASSERT_EQ(props.size(), std::size_t(2));
     ASSERT_NE(props.find("INFERENCE_NUM_THREADS"), props.end());
@@ -153,14 +155,16 @@ TEST(genai_pipeline_config, runtime_config_entries_pass_through)
     EXPECT_EQ(props.find("draft_model"),      props.end());     //  no draft model
 }
 
-TEST(genai_pipeline_config, cache_dir_overrides_runtime_config_same_key)
+TEST(genai_pipeline_config, cache_dir_is_a_runtime_property)
 {
-    //  Python assigns CACHE_DIR after the runtime_config,  so a later
-    //  assignment wins for the same key.
+    //  cache_dir is now a runtime property: it flows through
+    //  runtime.toProperties() (the genai layer no longer adds a separate
+    //  CACHE_DIR step).
     ModelLoadConfig c = baseConfig();
-    c.runtime_config_json = R"({"CACHE_DIR":"/from-runtime","INFERENCE_NUM_THREADS":4})";
-    c.cache_dir = std::string("/from-top-level");
-    GenAIPipelineConfig pc(c, ModelSchedulerConfig{});
+    ModelRuntimeConfig rt;
+    rt.cache_dir            = std::string("/from-top-level");
+    rt.inference_num_threads = 4;
+    GenAIPipelineConfig pc(c, ModelSchedulerConfig{}, rt);
     ov::AnyMap props = pc.toPipelineProperties();
     ASSERT_NE(props.find("CACHE_DIR"), props.end());
     EXPECT_EQ(props.at("CACHE_DIR").as<std::string>(), "/from-top-level");
@@ -215,10 +219,12 @@ TEST(genai_pipeline_config, scheduler_config_rejected_by_sdpa_backend)
     //  backend AND the operator authored a non-empty scheduler block,
     //  extract_scheduler_config_from_loader drops it and logs an error.
     ModelLoadConfig c = baseConfig();
-    c.runtime_config_json    = R"({"ATTENTION_BACKEND":"SDPA","INFERENCE_NUM_THREADS":4})";
+    ModelRuntimeConfig rt;
+    rt.attention_backend    = std::string("SDPA");
+    rt.inference_num_threads = 4;
     ModelSchedulerConfig sc;
     sc.max_num_batched_tokens = std::size_t(1024);
-    GenAIPipelineConfig pc(c, sc);
+    GenAIPipelineConfig pc(c, sc, rt);
     ov::AnyMap props = pc.toPipelineProperties();
     EXPECT_EQ(props.find("scheduler_config"), props.end());
     //  The rest of the runtime_config flows through untouched.

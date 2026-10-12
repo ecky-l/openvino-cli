@@ -13,6 +13,7 @@
 #include "model_scheduler_config.hpp"
 #include "config.hpp"
 #include "model_load_config.hpp"       // the load section, spliced into our parse
+#include "model_runtime_config.hpp"    // the runtime section, spliced into our parse
 #include "model_request_config.hpp"    // the request section, spliced into our parse
 
 #include <algorithm>
@@ -185,6 +186,7 @@ ModelSchedulerConfig parseModelSchedulerConfig(const std::vector<std::string>& a
   // "known" (not "unknown option") while we read only the scheduler fields.
   po::options_description desc;
   desc.add(ModelSchedulerConfig::schedulerOptionsDesc());
+  desc.add(ModelRuntimeConfig::runtimeOptionsDesc());
   desc.add(ModelLoadConfig::loadOptionsDesc());
   desc.add(ModelRequestConfig::requestOptionsDesc());
   desc.add_options()("help", po::bool_switch(), "Show this help message");

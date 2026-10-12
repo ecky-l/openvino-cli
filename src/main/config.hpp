@@ -46,6 +46,7 @@ namespace config {
 struct ModelLoadConfig;
 struct ModelSchedulerConfig;
 struct ModelRequestConfig;
+struct ModelRuntimeConfig;
 
 // Thrown when the operator's config arguments are missing, unknown, or invalid.
 // Its message points at the offending flag; callers print it to stderr and exit
@@ -95,12 +96,18 @@ PreProcessed preProcess(const std::vector<std::string>& args);
 ConfigError rephraseBoost(const po::error& e);
 
 // The composite JSON for the `show-config` subcommand: a single object with
-// three top-level keys -- "load_config" (modelLoadConfigToJson),
-// "scheduler_config" (modelSchedulerConfigToJson) and "request_config"
-// (modelRequestConfigToJson).
+// four top-level keys -- "load_config" (modelLoadConfigToJson),
+// "runtime_config" (modelRuntimeConfigToJson),  "scheduler_config"
+// (modelSchedulerConfigToJson) and "request_config" (modelRequestConfigToJson).
 std::string showConfigJson(const ModelLoadConfig& loadConfig,
+                           const ModelRuntimeConfig& runtimeConfig,
                            const ModelSchedulerConfig& schedulerConfig,
                            const ModelRequestConfig& requestConfig);
+
+// The combined --help view: renders the load, then runtime, then scheduler, then
+// request sections (each exactly as its owning class renders it), so `ovcli
+// <cmd> --help` shows all four parameter groups.  Owns no parameters -- it only
+// composes the three-plus-one.
 
 // The combined --help view: renders the load, then scheduler, then request
 // sections (each exactly as its owning class renders it), so `ovcli <cmd>

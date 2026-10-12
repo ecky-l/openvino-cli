@@ -9,6 +9,7 @@
 #include "model_request_config.hpp"
 #include "config.hpp"
 #include "model_load_config.hpp"       // the load section, spliced into our parse
+#include "model_runtime_config.hpp"    // the runtime section, spliced into our parse
 #include "model_scheduler_config.hpp"  // the scheduler section, spliced into our parse
 
 #include <algorithm>
@@ -168,6 +169,7 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
   // request fields.
   po::options_description desc;
   desc.add(ModelRequestConfig::requestOptionsDesc());
+  desc.add(ModelRuntimeConfig::runtimeOptionsDesc());
   desc.add(ModelLoadConfig::loadOptionsDesc());
   desc.add(ModelSchedulerConfig::schedulerOptionsDesc());
   desc.add_options()("help", po::bool_switch(), "Show this help message");
