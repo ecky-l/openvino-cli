@@ -1,11 +1,13 @@
 // ovcli's per-request generation config: the "Model request parameters" boost
 // section this class owns (requestOptionsDesc / usage), its parser, and its JSON
 // round-trip (snake_case keys, so the wire form is identical on both sides).
-// Request-only helpers live in this file's
-// anonymous namespace; the argv / boost / number / JSON coercions all sections
-// share come from config.hpp (ConfigError is one of them); the load + scheduler
-// section descriptions are included so the parser splices them in alongside our
-// own.
+// Request-only helpers live in this file's anonymous namespace; the argv / boost
+// / number / JSON coercions all sections share come from config.hpp (ConfigError
+// is one of them); the load + runtime + scheduler section descriptions are
+// included so the parser splices them in alongside our own.  Every parallel
+// structure (the options,  the parser,  the JSON reader / writer) lists the 12
+// fields in the same *alphabetical* order as the header so it reads the same way
+// top-to-bottom.
 #include "model_request_config.hpp"
 #include "config.hpp"
 #include "model_load_config.hpp"       // the load section, spliced into our parse
@@ -101,46 +103,57 @@ void readDefaultSize(rapidjson::Document& doc, const char* key,
 // --- The "Model request parameters" boost section this class owns ------------
 //
 // The generation-config flags (the ones the model-load section does not carry),
-// each with a single-letter short where its first letter is not already claimed
-// by a longer-name prefix. Single source of truth for both usage() (its
-// contribution to the shared --help) and parseModelRequestConfig (spliced
-// alongside the load section the other class owns).
+// in alphabetical-flag order, each with a single-letter short only where its
+// first letter is not already claimed by a longer-name prefix.  Single source of
+// truth for both usage() (its contribution to the shared --help) and
+// parseModelRequestConfig (spliced alongside the other sections).
 po::options_description ModelRequestConfig::requestOptionsDesc() {
   po::options_description s(
       "Model request parameters (worker: per-request defaults; run: the one request)",
       kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
-    ("num-assistant-tokens,n", po::value<std::string>(),
-        "Draft tokens per speculative step — per-request default; protocol can override")
     ("assistant-confidence-threshold,a", po::value<std::string>(),
-        "Confidence threshold for accepting draft tokens — per-request default; protocol can override")
-    ("tool-call-parser", po::value<std::string>(),
-        "Tool-call output format: qwen35, hermes, gemma4 or museglimmer "
-        "(no short: prefix-conflicts --model-type)")
-    ("max-tokens", po::value<std::string>(),
-        "Max new tokens to generate (default 16384)")
-    ("temperature", po::value<std::string>(),
-        "Sampling temperature > 0; 0 or negative → greedy (default 1.0)")
-    ("top-k", po::value<std::string>(),
-        "Top-k sampling; 0 disables (default 50)")
-    ("top-p", po::value<std::string>(),
-        "Top-p (nucleus) sampling threshold (default 1.0)")
-    ("repetition-penalty", po::value<std::string>(),
-        "Repetition penalty; 1.0 = no penalty (default)")
-    ("seed", po::value<std::string>(),
-        "Random seed for reproducible sampling")
-    ("frequency-penalty", po::value<std::string>(),
-        "Frequency penalty (non-optional default 0; 0 = off / nullopt)")
-    ("presence-penalty", po::value<std::string>(),
-        "Presence penalty (non-optional default 0; 0 = off / nullopt)")
+        "Confidence threshold for accepting a speculative (assistant/draft) token: "
+        "a draft is accepted only when the main model's probability for it is at least this. "
+        "Lower = accept more drafts (faster, riskier), higher = more conservative. "
+        "Per-request default (the worker protocol may override per request).")
     ("chat-template-kwargs", po::value<std::string>(),
-        "Chat template kwargs as a JSON object; e.g. "
-        "{\"add_generation_prompt\":true}");
+        "Chat-template kwargs as a JSON object passed to the tokenizer's apply_chat_template, "
+        "e.g. {\"add_generation_prompt\": true}.")
+    ("frequency-penalty", po::value<std::string>(),
+        "Penalty proportional to how often a token has already appeared in the output; "
+        "0 = no penalty, higher = penalise frequently-repeated tokens by their frequency.")
+    ("max-tokens", po::value<std::string>(),
+        "Maximum number of new tokens to generate before stopping (default 16384).")
+    ("num-assistant-tokens,n", po::value<std::string>(),
+        "Number of draft ('assistant') tokens produced per speculative-decoding step "
+        "before they are verified against the main model (used with "
+        "--assistant-confidence-threshold). Per-request default (the worker protocol may override).")
+    ("presence-penalty", po::value<std::string>(),
+        "Penalty added to the logit of any token that has already appeared in the output, "
+        "regardless of how often; 0 = no penalty, higher = penalise reappearing tokens (encourages variety).")
+    ("repetition-penalty", po::value<std::string>(),
+        "A logit multiplier for already-generated tokens; 1.0 = no penalty (the default), "
+        ">1.0 penalises repeated tokens, <1.0 favours them.")
+    ("seed", po::value<std::string>(),
+        "A random seed for reproducible sampling (the same model / flags / seed reproduces the same token sequence).")
+    ("temperature", po::value<std::string>(),
+        "Sampling temperature as a float > 0 -- higher = more random/uniform, lower = more "
+        "deterministic; 0 or negative = greedy (deterministic) decoding. Default 1.0.")
+    ("tool-call-parser", po::value<std::string>(),
+        "Tool-call (function-calling) output format/parser for the generation output: "
+        "qwen35 / hermes / gemma4 / museglimmer (no short: --tool-* prefix-conflicts the other 't' flags).")
+    ("top-k", po::value<std::string>(),
+        "Top-k sampling: only the k highest-probability tokens are considered; 0 disables "
+        "top-k (considers all). Default 50 -- so a value is required to turn it off.")
+    ("top-p", po::value<std::string>(),
+        "Top-p (nucleus) sampling threshold 0..1: the smallest set of highest-probability "
+        "tokens whose cumulative probability reaches p is considered; 1.0 = disabled. Default 1.0.");
   return s;
 }
 
 // This class's slice of the --help listing (its "Model request parameters"
-// section only); the combined two-section view is config.cpp's
+// section only); the combined four-section view is config.cpp's
 // combinedConfigUsage.
 std::string ModelRequestConfig::usage() {
   std::ostringstream os;
@@ -150,9 +163,10 @@ std::string ModelRequestConfig::usage() {
 
 // --- Public: parseModelRequestConfig (for ovcli run) -------------------------
 //
-// Reads only the generation-config fields. Parsed over the full argv (this
-// class's section plus the load section the other class owns) so boost doesn't
-// reject the load flags that this function simply doesn't read.
+// Reads only the generation-config fields (alphabetical). Parsed over the full
+// argv (this class's section plus the load + runtime + scheduler sections the
+// other classes own) so boost doesn't reject their flags that this function
+// simply doesn't read.
 ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args) {
   const PreProcessed pp = preProcess(args);
   if (pp.positionalCount > 1) {
@@ -164,10 +178,10 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
   cleanArgs.erase(std::remove(cleanArgs.begin(), cleanArgs.end(), std::string("-")),
                   cleanArgs.end());
 
-  // Parse over the full argv: all three sections (our request section plus the
-  // load + scheduler sections the other classes own), so boost doesn't reject
-  // their flags a caller also passes (not "unknown option"); we read only the
-  // request fields.
+  // Parse over the full argv: all four sections (our request section plus the
+  // load + runtime + scheduler sections the other classes own), so a caller's
+  // load / runtime / scheduler flags are "known" (not "unknown option"); we read
+  // only the request fields.
   po::options_description desc;
   desc.add(ModelRequestConfig::requestOptionsDesc());
   desc.add(ModelRuntimeConfig::runtimeOptionsDesc());
@@ -189,47 +203,48 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
     throw rephraseBoost(e);
   }
 
-  // Only read the generation-config fields; load-section fields (present in the
-  // same vm but for the other parser) are simply not accessed.
+  // Only read the generation-config fields (alphabetical); the load / runtime /
+  // scheduler fields (present in the same vm but for the other parsers) are
+  // simply not accessed.
   ModelRequestConfig cfg;  // non-optional fields at struct defaults
+  if (vm.count("assistant-confidence-threshold"))
+    cfg.assistant_confidence_threshold =
+        parseDouble(vm["assistant-confidence-threshold"].as<std::string>(),
+                     "--assistant-confidence-threshold");
+  if (vm.count("chat-template-kwargs"))
+    cfg.chat_template_kwargs = std::string(requireJsonObject(
+        vm["chat-template-kwargs"].as<std::string>(),
+        "--chat-template-kwargs"));
+  if (vm.count("frequency-penalty"))
+    cfg.frequency_penalty = parseDouble(vm["frequency-penalty"].as<std::string>(),
+                                        "--frequency-penalty");
   if (vm.count("max-tokens"))
     cfg.max_tokens = static_cast<std::size_t>(
         parseSize(vm["max-tokens"].as<std::string>(), "--max-tokens"));
-  if (vm.count("temperature"))
-    cfg.temperature = parseDouble(vm["temperature"].as<std::string>(), "--temperature");
-  if (vm.count("top-k"))
-    cfg.top_k = static_cast<std::size_t>(
-        parseSize(vm["top-k"].as<std::string>(), "--top-k"));
-  if (vm.count("top-p"))
-    cfg.top_p = parseDouble(vm["top-p"].as<std::string>(), "--top-p");
+  if (vm.count("num-assistant-tokens"))
+    cfg.num_assistant_tokens = static_cast<std::size_t>(
+        parseSize(vm["num-assistant-tokens"].as<std::string>(),
+                   "--num-assistant-tokens"));
+  if (vm.count("presence-penalty"))
+    cfg.presence_penalty = parseDouble(vm["presence-penalty"].as<std::string>(),
+                                       "--presence-penalty");
   if (vm.count("repetition-penalty"))
     cfg.repetition_penalty = parseDouble(vm["repetition-penalty"].as<std::string>(),
                                         "--repetition-penalty");
   if (vm.count("seed"))
     cfg.seed = static_cast<std::size_t>(
         parseSize(vm["seed"].as<std::string>(), "--seed"));
-  if (vm.count("frequency-penalty"))
-    cfg.frequency_penalty = parseDouble(vm["frequency-penalty"].as<std::string>(),
-                                        "--frequency-penalty");
-  if (vm.count("presence-penalty"))
-    cfg.presence_penalty = parseDouble(vm["presence-penalty"].as<std::string>(),
-                                       "--presence-penalty");
-  if (vm.count("num-assistant-tokens"))
-    cfg.num_assistant_tokens = static_cast<std::size_t>(
-        parseSize(vm["num-assistant-tokens"].as<std::string>(),
-                   "--num-assistant-tokens"));
-  if (vm.count("assistant-confidence-threshold"))
-    cfg.assistant_confidence_threshold =
-        parseDouble(vm["assistant-confidence-threshold"].as<std::string>(),
-                     "--assistant-confidence-threshold");
+  if (vm.count("temperature"))
+    cfg.temperature = parseDouble(vm["temperature"].as<std::string>(), "--temperature");
   if (vm.count("tool-call-parser")) {
     const std::string v = vm["tool-call-parser"].as<std::string>();
     if (!v.empty()) cfg.tool_call_parser = v;
   }
-  if (vm.count("chat-template-kwargs"))
-    cfg.chat_template_kwargs = std::string(requireJsonObject(
-        vm["chat-template-kwargs"].as<std::string>(),
-        "--chat-template-kwargs"));
+  if (vm.count("top-k"))
+    cfg.top_k = static_cast<std::size_t>(
+        parseSize(vm["top-k"].as<std::string>(), "--top-k"));
+  if (vm.count("top-p"))
+    cfg.top_p = parseDouble(vm["top-p"].as<std::string>(), "--top-p");
 
   if (cfg.tool_call_parser.has_value() && !cfg.tool_call_parser->empty() &&
       !inSet(*cfg.tool_call_parser, kToolParsers))
@@ -239,6 +254,10 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
 }
 
 // --- Public: modelRequestConfigFromJson -------------------------------------
+//
+// Read each recognised key (alphabetical) as the matching type; a non-optional
+// key with an absent (or null) value keeps its struct default, an optional one
+// stays at nullopt; a present value of the wrong type is a ConfigError.
 ModelRequestConfig modelRequestConfigFromJson(const std::string& json) {
   rapidjson::Document doc;
   if (doc.Parse<0>(json.c_str()).HasParseError())
@@ -247,19 +266,7 @@ ModelRequestConfig modelRequestConfigFromJson(const std::string& json) {
   if (!doc.IsObject()) throw ConfigError("runtime config must be a JSON object");
 
   ModelRequestConfig cfg;  // non-optional at struct defaults
-  // Non-optional (have struct defaults; skip if absent or null)
-  readDefaultSize(doc,   "max_tokens",         cfg.max_tokens,          "runtime_config.max_tokens");
-  readDefaultDouble(doc, "temperature",        cfg.temperature,          "runtime_config.temperature");
-  readDefaultSize(doc,   "top_k",              cfg.top_k,               "runtime_config.top_k");
-  readDefaultDouble(doc, "top_p",              cfg.top_p,               "runtime_config.top_p");
-  readDefaultDouble(doc, "repetition_penalty", cfg.repetition_penalty,   "runtime_config.repetition_penalty");
-  // Optional
-  readOptInt(doc,    "seed",                          cfg.seed,                         "runtime_config.seed");
-  readOptDouble(doc, "frequency_penalty",             cfg.frequency_penalty,            "runtime_config.frequency_penalty");
-  readOptDouble(doc, "presence_penalty",              cfg.presence_penalty,             "runtime_config.presence_penalty");
-  readOptInt(doc,    "num_assistant_tokens",          cfg.num_assistant_tokens,         "runtime_config.num_assistant_tokens");
-  readOptDouble(doc, "assistant_confidence_threshold",cfg.assistant_confidence_threshold,"runtime_config.assistant_confidence_threshold");
-  readOptStr(doc,    "tool_call_parser",              cfg.tool_call_parser,             "runtime_config.tool_call_parser");
+  readOptDouble(doc, "assistant_confidence_threshold", cfg.assistant_confidence_threshold, "runtime_config.assistant_confidence_threshold");
   // chat_template_kwargs: a JSON object; compact it if present.
   {
     auto it = doc.FindMember("chat_template_kwargs");
@@ -269,6 +276,16 @@ ModelRequestConfig modelRequestConfigFromJson(const std::string& json) {
       cfg.chat_template_kwargs = std::string(compactJsonOf(it->value));
     }
   }
+  readOptDouble(doc, "frequency_penalty", cfg.frequency_penalty, "runtime_config.frequency_penalty");
+  readDefaultSize(doc,   "max_tokens",    cfg.max_tokens,        "runtime_config.max_tokens");
+  readOptInt(doc,    "num_assistant_tokens",  cfg.num_assistant_tokens,   "runtime_config.num_assistant_tokens");
+  readOptDouble(doc, "presence_penalty",  cfg.presence_penalty,   "runtime_config.presence_penalty");
+  readDefaultDouble(doc, "repetition_penalty", cfg.repetition_penalty, "runtime_config.repetition_penalty");
+  readOptInt(doc,    "seed",              cfg.seed,               "runtime_config.seed");
+  readDefaultDouble(doc, "temperature",   cfg.temperature,        "runtime_config.temperature");
+  readOptStr(doc,    "tool_call_parser",  cfg.tool_call_parser,   "runtime_config.tool_call_parser");
+  readDefaultSize(doc,   "top_k",         cfg.top_k,              "runtime_config.top_k");
+  readDefaultDouble(doc, "top_p",         cfg.top_p,              "runtime_config.top_p");
   return cfg;
 }
 
@@ -290,28 +307,12 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
     rapidjson::Value val(v.c_str(), v.size(), a);
     out.AddMember(k, val, a);
   };
-  // Non-optional fields carry a real default (max_tokens / temperature /
-  // top_k / top_p / repetition_penalty), so they are always emitted -- a
-  // key that has a default value is *set*, and the output keeps that default
-  // even when the request did not ask for it (matches pydantic's non-Option
-  // fields; e.g. ModelRequestConfig::max_tokens = 16384).
-  addInt("max_tokens",         c.max_tokens);
-  addDouble("temperature",     c.temperature);
-  addInt("top_k",             c.top_k);
-  addDouble("top_p",           c.top_p);
-  addDouble("repetition_penalty", c.repetition_penalty);
-  // Optional generation knobs: a not-set (nullopt) key is omitted entirely
-  // (no "null" placeholder) -- a key appears only when the request sets it.
-  // An explicitly supplied 0 / false is a *set* value and is still emitted.
-  if (c.seed.has_value()) addInt("seed", *c.seed);
-  if (c.frequency_penalty.has_value()) addDouble("frequency_penalty", *c.frequency_penalty);
-  if (c.presence_penalty.has_value()) addDouble("presence_penalty", *c.presence_penalty);
-  if (c.num_assistant_tokens.has_value()) addInt("num_assistant_tokens", *c.num_assistant_tokens);
+  // Emit fields in alphabetical order.  The non-optional fields (max_tokens /
+  // temperature / top_k / top_p / repetition_penalty) carry a real default, so
+  // they are always emitted; an optional key is omitted entirely (no "null"
+  // placeholder) unless it is set.
   if (c.assistant_confidence_threshold.has_value())
     addDouble("assistant_confidence_threshold", *c.assistant_confidence_threshold);
-  // String optionals: omit when unset (nullopt, or an empty string).
-  if (c.tool_call_parser && !c.tool_call_parser->empty())
-    addStr("tool_call_parser", *c.tool_call_parser);
   if (c.chat_template_kwargs && !c.chat_template_kwargs->empty()) {
     rapidjson::Document tmp;
     rapidjson::Value node;
@@ -320,6 +321,17 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
     else node.SetObject();
     out.AddMember(rapidjson::Value("chat_template_kwargs", a), std::move(node), a);
   }
+  if (c.frequency_penalty.has_value()) addDouble("frequency_penalty", *c.frequency_penalty);
+  addInt("max_tokens",         c.max_tokens);
+  if (c.num_assistant_tokens.has_value()) addInt("num_assistant_tokens", *c.num_assistant_tokens);
+  if (c.presence_penalty.has_value()) addDouble("presence_penalty", *c.presence_penalty);
+  addDouble("repetition_penalty", c.repetition_penalty);
+  if (c.seed.has_value()) addInt("seed", *c.seed);
+  addDouble("temperature",     c.temperature);
+  if (c.tool_call_parser && !c.tool_call_parser->empty())
+    addStr("tool_call_parser", *c.tool_call_parser);
+  addInt("top_k",             c.top_k);
+  addDouble("top_p",           c.top_p);
 
   rapidjson::StringBuffer sb;
   rapidjson::Writer<rapidjson::StringBuffer> w(sb);

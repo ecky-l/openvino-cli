@@ -9,7 +9,10 @@
 // Scheduler-only helpers live in this file's anonymous namespace (parseBool +
 // the two flat JSON readers); the argv / boost / number coercions all three
 // sections share come from config.hpp; the load + request section descriptions
-// are included so the parser splices them alongside our own.
+// are included so the parser splices them alongside our own.  Every parallel
+// structure (the options,  the parser,  the JSON reader / writer,  hasAnySet,
+// toSchedulerConfig) lists the 10 fields in the same *alphabetical* order so it
+// reads top-to-bottom the way the header does.
 #include "model_scheduler_config.hpp"
 #include "config.hpp"
 #include "model_load_config.hpp"       // the load section, spliced into our parse
@@ -73,43 +76,54 @@ std::optional<bool> readOptionalBool(rapidjson::Value& v, const char* name) {
 
 // --- The "Scheduler Options" boost section this class owns -------------------
 //
-// The 10 KV-cache / batching flags, each with a single-letter short only where
-// its first letter is unclaimed by a longer-name prefix (the schedulers' long
-// names start with c/m/n/u, so the load section's c/m/n and the request
-// section's n are all taken; the schedulers keep long form only).  Single source
-// of truth for both usage() (its contribution to the shared --help) and
-// parseModelSchedulerConfig (spliced alongside the load + request sections the
-// other classes own).
+// The 10 KV-cache / batching flags, in alphabetical-flag order, long-form only.
+// Single source of truth for both usage() (its contribution to the shared
+// --help) and parseModelSchedulerConfig.  Each description below is a concise
+// paraphrase of the matching ov::genai::SchedulerConfig field's doc comment.
 po::options_description ModelSchedulerConfig::schedulerOptionsDesc() {
   po::options_description s(
       "Scheduler Options (KV-cache / batching knobs the pipeline is built with; nullopt = engine default)",
       kHelpLineLength, kHelpMinDescriptionLength);
   s.add_options()
-    ("max-num-batched-tokens", po::value<std::string>(),
-        "Max tokens in a single batch step (SchedulerConfig default: 256)")
-    ("num-kv-blocks", po::value<std::string>(),
-        "Number of KV-cache blocks")
-    ("cache-size", po::value<std::string>(),
-        "KV-cache total size in bytes; 0 = auto")
-    ("num-linear-attention-blocks", po::value<std::string>(),
-        "Blocks per linear-attention segment; 0 = unset")
     ("cache-interval-multiplier", po::value<std::string>(),
-        "KV-cache eviction interval multiplier; 0 = auto / prefix-off")
+        "Multiplier for the linear-attention checkpoint interval used by prefix caching "
+        "(the internal interval = KV cache block size x this; default 8, auto-derived from the model when unset). "
+        "A larger value uses less memory at the cost of coarser prefix-cache reuse; "
+        "0 is valid only when prefix caching is disabled, and is ignored for models without linear-attention cache inputs.")
+    ("cache-size", po::value<std::string>(),
+        "Total size of the KV cache in GB; 0 turns on dynamic (auto) cache allocation. "
+        "If both --cache-size and --num-kv-blocks are set, --num-kv-blocks takes precedence.")
     ("dynamic-split-fuse", po::value<std::string>(),
-        "Enable dynamic split-fuse: true/false")
-    ("max-num-seqs", po::value<std::string>(),
-        "Max concurrent sequences in a batch (SchedulerConfig default: 256)")
+        "Split prompt and generate into different scheduling phases (default true). "
+        "Allows a prompt longer than the batch to be processed in parts; if disabled, "
+        "any prompt longer than the batch size errors out.")
     ("enable-prefix-caching", po::value<std::string>(),
-        "Enable prefix caching: true/false")
+        "Keep previously-computed KV-caches in memory for reuse across sequences (default false). "
+        "On by default in the LLMPipeline 'client' scenario; when on, more RAM is used "
+        "(bounded by cache-size / num-kv-blocks); when off, a finished sequence's cache is released.")
+    ("max-num-batched-tokens", po::value<std::string>(),
+        "Maximum number of tokens in a single batch step (default 256; unbounded in the "
+        "LLMPipeline 'client' scenario). Counts total batched tokens, unlike --max-num-seqs, which counts sequences.")
+    ("max-num-seqs", po::value<std::string>(),
+        "Maximum number of scheduled sequences -- effectively the batch size on the generate phase "
+        "(default 256); on the prompt phase the scheduled-token count is usually larger.")
+    ("num-kv-blocks", po::value<std::string>(),
+        "Total number of KV-cache blocks available to the scheduler (default 0 = dynamic). "
+        "If both --num-kv-blocks and --cache-size are set, this one takes precedence.")
+    ("num-linear-attention-blocks", po::value<std::string>(),
+        "Total number of linear-attention (state/SSM) blocks available to the scheduler "
+        "(default 0 = auto-derived from --max-num-seqs when linear-attention layers are present; "
+        "each block holds the full state for one sequence).")
     ("use-cache-eviction", po::value<std::string>(),
-        "Enable cache eviction: true/false")
+        "Enable cache eviction for all sequences this pipeline processes (default false). "
+        "Caps per-sequence KV-cache usage by a user-configurable value -- memory savings at the cost of generation quality.")
     ("use-sparse-attention", po::value<std::string>(),
-        "Enable sparse attention: true/false");
+        "Apply block-wise sparse attention to the prefill (prompt) stage (default false).");
   return s;
 }
 
 // This class's slice of the --help listing (its "Scheduler Options" section
-// only); the combined three-section view is config.cpp's combinedConfigUsage.
+// only); the combined four-section view is config.cpp's combinedConfigUsage.
 std::string ModelSchedulerConfig::usage() {
   std::ostringstream os;
   os << ModelSchedulerConfig::schedulerOptionsDesc();
@@ -117,60 +131,56 @@ std::string ModelSchedulerConfig::usage() {
 }
 
 // True when at least one field is non-nullopt (corresponds to Python's
-// `sched_config_dict = model_dump(exclude_unset=True); if not dict:`).
+// `sched_config_dict = model_dump(exclude_unset=True); if not dict:`).  Listed
+// in the same alphabetical order as the struct.
 bool ModelSchedulerConfig::hasAnySet() const {
-  return max_num_batched_tokens.has_value()  || num_kv_blocks.has_value()  ||
-         cache_size.has_value()              || num_linear_attention_blocks.has_value()  ||
-         cache_interval_multiplier.has_value() || dynamic_split_fuse.has_value()  ||
-         max_num_seqs.has_value()           || enable_prefix_caching.has_value()  ||
-         use_cache_eviction.has_value()     || use_sparse_attention.has_value();
+  return cache_interval_multiplier.has_value() || cache_size.has_value()  ||
+         dynamic_split_fuse.has_value()        || enable_prefix_caching.has_value()  ||
+         max_num_batched_tokens.has_value()    || max_num_seqs.has_value()  ||
+         num_kv_blocks.has_value()             || num_linear_attention_blocks.has_value()  ||
+         use_cache_eviction.has_value()        || use_sparse_attention.has_value();
 }
 
 // Build the ov::genai::SchedulerConfig the pipeline consumes:
 //   result = a default-constructed SchedulerConfig, and then, for every field,
-//   forward it only when it is "truthy".
-// "truthy" means has_value() && *val is truthy: a size_t forwards only when
-// nonzero (0 is the engine-default sentinel), and a bool forwards only when
-// true (a false value leaves the engine default untouched).  The one exception is
-// cache_interval_multiplier, which the engine keeps as an optional and forward
-// on has_value() alone (0 is a valid value when prefix caching is off; the
-// engine's own validate() enforces that).
+//   forward it only when it is "truthy".  "truthy" means has_value() && *val is
+//   truthy: a size_t forwards only when nonzero (0 is the engine-default
+//   sentinel), and a bool forwards only when true (a false value leaves the
+//   engine default untouched).  The one exception is cache_interval_multiplier,
+//   which the engine keeps as an optional and forward on has_value() alone (0 is
+//   a valid value when prefix caching is off; the engine's own validate()
+//   enforces that).  Fields are forwarded in alphabetical order.
 ov::genai::SchedulerConfig ModelSchedulerConfig::toSchedulerConfig() const {
   ov::genai::SchedulerConfig result;   // every field starts at the engine default
-  // size_t fields: forward only when has_value() AND nonzero (0 in Python means
-  // "falsy", i.e. leave the engine default untouched).
-  if (max_num_batched_tokens.has_value()        && *max_num_batched_tokens != 0)
-    result.max_num_batched_tokens = *max_num_batched_tokens;
-  if (num_kv_blocks.has_value()                 && *num_kv_blocks != 0)
-    result.num_kv_blocks          = *num_kv_blocks;
-  if (cache_size.has_value()                    && *cache_size != 0)
-    result.cache_size             = *cache_size;
-  if (num_linear_attention_blocks.has_value()   && *num_linear_attention_blocks != 0)
-    result.num_linear_attention_blocks = *num_linear_attention_blocks;
-  // cache_interval_multiplier is an optional on the engine side; forward it on
-  // has_value() alone (0 is valid when prefix caching is off).
   if (cache_interval_multiplier.has_value())
-    result.cache_interval_multiplier = *cache_interval_multiplier;
-  // bool fields: forward only when has_value() AND true (False is falsy in
-  // Python, so `if False:` leaves the engine default untouched).
-  if (dynamic_split_fuse.has_value()    && *dynamic_split_fuse)
+    result.cache_interval_multiplier = *cache_interval_multiplier;   // has_value() only (0 valid when prefix off)
+  if (cache_size.has_value()                && *cache_size != 0)
+    result.cache_size             = *cache_size;
+  if (dynamic_split_fuse.has_value()        && *dynamic_split_fuse)
     result.dynamic_split_fuse    = *dynamic_split_fuse;
-  if (max_num_seqs.has_value()          && *max_num_seqs != 0)
-    result.max_num_seqs          = *max_num_seqs;
-  if (enable_prefix_caching.has_value() && *enable_prefix_caching)
+  if (enable_prefix_caching.has_value()     && *enable_prefix_caching)
     result.enable_prefix_caching = *enable_prefix_caching;
-  if (use_cache_eviction.has_value()    && *use_cache_eviction)
+  if (max_num_batched_tokens.has_value()    && *max_num_batched_tokens != 0)
+    result.max_num_batched_tokens = *max_num_batched_tokens;
+  if (max_num_seqs.has_value()             && *max_num_seqs != 0)
+    result.max_num_seqs          = *max_num_seqs;
+  if (num_kv_blocks.has_value()            && *num_kv_blocks != 0)
+    result.num_kv_blocks          = *num_kv_blocks;
+  if (num_linear_attention_blocks.has_value() && *num_linear_attention_blocks != 0)
+    result.num_linear_attention_blocks = *num_linear_attention_blocks;
+  if (use_cache_eviction.has_value()        && *use_cache_eviction)
     result.use_cache_eviction    = *use_cache_eviction;
-  if (use_sparse_attention.has_value()  && *use_sparse_attention)
+  if (use_sparse_attention.has_value()      && *use_sparse_attention)
     result.use_sparse_attention  = *use_sparse_attention;
   return result;
 }
 
 // --- Public: parseModelSchedulerConfig -------------------------------------
 //
-// Reads only the 10 scheduler fields.  Parsed over the full argv (this class's
-// section plus the load + request sections the other classes own) so boost
-// doesn't reject the sibling flags that this parser simply doesn't read.
+// Reads only the 10 scheduler fields (in alphabetical order).  Parsed over the
+// full argv (this class's section plus the load + request sections the other
+// classes own) so boost doesn't reject the sibling flags that this parser
+// simply doesn't read.
 ModelSchedulerConfig parseModelSchedulerConfig(const std::vector<std::string>& args) {
   const PreProcessed pp = preProcess(args);
   if (pp.positionalCount > 1) {
@@ -206,33 +216,33 @@ ModelSchedulerConfig parseModelSchedulerConfig(const std::vector<std::string>& a
     throw rephraseBoost(e);
   }
 
-  // Read only the 10 scheduler fields; the load / request fields present in the
-  // same vm (for the other parsers) are simply not accessed.
+  // Read only the 10 scheduler fields (alphabetical); the load / request fields
+  // present in the same vm (for the other parsers) are simply not accessed.
   ModelSchedulerConfig cfg;  // all 10 optionals at nullopt
-  if (vm.count("max-num-batched-tokens"))
-    cfg.max_num_batched_tokens = static_cast<std::size_t>(
-        parseSize(vm["max-num-batched-tokens"].as<std::string>(), "--max-num-batched-tokens"));
-  if (vm.count("num-kv-blocks"))
-    cfg.num_kv_blocks = static_cast<std::size_t>(
-        parseSize(vm["num-kv-blocks"].as<std::string>(), "--num-kv-blocks"));
-  if (vm.count("cache-size"))
-    cfg.cache_size = static_cast<std::size_t>(
-        parseSize(vm["cache-size"].as<std::string>(), "--cache-size"));
-  if (vm.count("num-linear-attention-blocks"))
-    cfg.num_linear_attention_blocks = static_cast<std::size_t>(
-        parseSize(vm["num-linear-attention-blocks"].as<std::string>(), "--num-linear-attention-blocks"));
   if (vm.count("cache-interval-multiplier"))
     cfg.cache_interval_multiplier = static_cast<std::size_t>(
         parseSize(vm["cache-interval-multiplier"].as<std::string>(), "--cache-interval-multiplier"));
+  if (vm.count("cache-size"))
+    cfg.cache_size = static_cast<std::size_t>(
+        parseSize(vm["cache-size"].as<std::string>(), "--cache-size"));
   if (vm.count("dynamic-split-fuse"))
     cfg.dynamic_split_fuse = parseBool(vm["dynamic-split-fuse"].as<std::string>(),
                                         "--dynamic-split-fuse");
-  if (vm.count("max-num-seqs"))
-    cfg.max_num_seqs = static_cast<std::size_t>(
-        parseSize(vm["max-num-seqs"].as<std::string>(), "--max-num-seqs"));
   if (vm.count("enable-prefix-caching"))
     cfg.enable_prefix_caching = parseBool(vm["enable-prefix-caching"].as<std::string>(),
                                           "--enable-prefix-caching");
+  if (vm.count("max-num-batched-tokens"))
+    cfg.max_num_batched_tokens = static_cast<std::size_t>(
+        parseSize(vm["max-num-batched-tokens"].as<std::string>(), "--max-num-batched-tokens"));
+  if (vm.count("max-num-seqs"))
+    cfg.max_num_seqs = static_cast<std::size_t>(
+        parseSize(vm["max-num-seqs"].as<std::string>(), "--max-num-seqs"));
+  if (vm.count("num-kv-blocks"))
+    cfg.num_kv_blocks = static_cast<std::size_t>(
+        parseSize(vm["num-kv-blocks"].as<std::string>(), "--num-kv-blocks"));
+  if (vm.count("num-linear-attention-blocks"))
+    cfg.num_linear_attention_blocks = static_cast<std::size_t>(
+        parseSize(vm["num-linear-attention-blocks"].as<std::string>(), "--num-linear-attention-blocks"));
   if (vm.count("use-cache-eviction"))
     cfg.use_cache_eviction = parseBool(vm["use-cache-eviction"].as<std::string>(),
                                         "--use-cache-eviction");
@@ -247,7 +257,9 @@ ModelSchedulerConfig parseModelSchedulerConfig(const std::vector<std::string>& a
 // Parse a (flat) scheduler_config object.  Each recognised key is read as the
 // matching SchedulerConfigSchema type;  an outright type mismatch throws
 // ConfigError,  a JSON null leaves the field at nullopt,  and unknown keys are
-// silently ignored (matching the sibling configs' tolerance).
+// silently ignored (matching the sibling configs' tolerance).  Keys are read in
+// the same alphabetical order as the struct (the if/else-if chain is
+// order-independent in effect, but alphabetical keeps it readable).
 ModelSchedulerConfig modelSchedulerConfigFromJson(const std::string& json) {
   rapidjson::Document doc;
   if (doc.Parse<0>(json.c_str()).HasParseError())
@@ -259,22 +271,22 @@ ModelSchedulerConfig modelSchedulerConfigFromJson(const std::string& json) {
   for (auto kv = doc.MemberBegin(); kv != doc.MemberEnd(); ++kv) {
     const std::string k = kv->name.GetString();
     if (kv->value.IsNull())  continue;   // JSON null -> Python None -> leave at nullopt
-    if (k == "max_num_batched_tokens")
-      sc.max_num_batched_tokens    = readOptionalSize(kv->value, "max_num_batched_tokens");
-    else if (k == "num_kv_blocks")
-      sc.num_kv_blocks             = readOptionalSize(kv->value, "num_kv_blocks");
+    if (k == "cache_interval_multiplier")
+      sc.cache_interval_multiplier = readOptionalSize(kv->value, "cache_interval_multiplier");
     else if (k == "cache_size")
       sc.cache_size               = readOptionalSize(kv->value, "cache_size");
-    else if (k == "num_linear_attention_blocks")
-      sc.num_linear_attention_blocks = readOptionalSize(kv->value, "num_linear_attention_blocks");
-    else if (k == "cache_interval_multiplier")
-      sc.cache_interval_multiplier = readOptionalSize(kv->value, "cache_interval_multiplier");
     else if (k == "dynamic_split_fuse")
       sc.dynamic_split_fuse       = readOptionalBool(kv->value, "dynamic_split_fuse");
-    else if (k == "max_num_seqs")
-      sc.max_num_seqs             = readOptionalSize(kv->value, "max_num_seqs");
     else if (k == "enable_prefix_caching")
       sc.enable_prefix_caching    = readOptionalBool(kv->value, "enable_prefix_caching");
+    else if (k == "max_num_batched_tokens")
+      sc.max_num_batched_tokens    = readOptionalSize(kv->value, "max_num_batched_tokens");
+    else if (k == "max_num_seqs")
+      sc.max_num_seqs             = readOptionalSize(kv->value, "max_num_seqs");
+    else if (k == "num_kv_blocks")
+      sc.num_kv_blocks             = readOptionalSize(kv->value, "num_kv_blocks");
+    else if (k == "num_linear_attention_blocks")
+      sc.num_linear_attention_blocks = readOptionalSize(kv->value, "num_linear_attention_blocks");
     else if (k == "use_cache_eviction")
       sc.use_cache_eviction       = readOptionalBool(kv->value, "use_cache_eviction");
     else if (k == "use_sparse_attention")
@@ -288,6 +300,7 @@ ModelSchedulerConfig modelSchedulerConfigFromJson(const std::string& json) {
 //
 // Emit only the set fields (an all-nullopt config -> the empty object).  This is
 // exactly what `show-config` places under the top-level "scheduler_config" key.
+// Fields are emitted in the same alphabetical order as the struct.
 std::string modelSchedulerConfigToJson(const ModelSchedulerConfig& c) {
   rapidjson::Document out(rapidjson::kObjectType);
   auto& a = out.GetAllocator();
@@ -307,16 +320,16 @@ std::string modelSchedulerConfigToJson(const ModelSchedulerConfig& c) {
       out.AddMember(k, v, a);
     }
   };
-  addInt("max_num_batched_tokens",      c.max_num_batched_tokens);
-  addInt("num_kv_blocks",               c.num_kv_blocks);
-  addInt("cache_size",                  c.cache_size);
+  addInt("cache_interval_multiplier", c.cache_interval_multiplier);
+  addInt("cache_size",                c.cache_size);
+  addBool("dynamic_split_fuse",       c.dynamic_split_fuse);
+  addBool("enable_prefix_caching",    c.enable_prefix_caching);
+  addInt("max_num_batched_tokens",    c.max_num_batched_tokens);
+  addInt("max_num_seqs",              c.max_num_seqs);
+  addInt("num_kv_blocks",             c.num_kv_blocks);
   addInt("num_linear_attention_blocks", c.num_linear_attention_blocks);
-  addInt("cache_interval_multiplier",   c.cache_interval_multiplier);
-  addBool("dynamic_split_fuse",         c.dynamic_split_fuse);
-  addInt("max_num_seqs",                c.max_num_seqs);
-  addBool("enable_prefix_caching",      c.enable_prefix_caching);
-  addBool("use_cache_eviction",         c.use_cache_eviction);
-  addBool("use_sparse_attention",       c.use_sparse_attention);
+  addBool("use_cache_eviction",       c.use_cache_eviction);
+  addBool("use_sparse_attention",     c.use_sparse_attention);
   // `out` is already the (possibly-empty) scheduler object: when nothing was set
   // it stays "{}" (matching the free-form blobs that default to {}).
   rapidjson::StringBuffer sb;
