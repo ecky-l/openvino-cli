@@ -150,6 +150,20 @@ TEST(parseLoadModel, unknownLongAndShortOptionReject) {
                             "unknown option");  // dropped, worker-only transport
 }
 
+// The three parameters removed in the subcommand redesign (d56480a: --engine and
+// --model-type; 9537b7f: --config-blocks). None survive it, so each is now rejected
+// as "unknown option" (not silently accepted and ignored) -- a load flag, a stale
+// free-form block, and the device/mode selector that the per-pipeline subcommand
+// name replaced respectively. Pinned so someone cannot quietly reintroduce one.
+TEST(parseLoadModel, removedObsoleteFlagsAreRejected) {
+  expectConfigErrorContains([] { parseModelLoadConfig(validMinAppend({"--engine", "x"})); },
+                            "unknown option");
+  expectConfigErrorContains([] { parseModelLoadConfig(validMinAppend({"--model-type", "x"})); },
+                            "unknown option");
+  expectConfigErrorContains([] { parseModelLoadConfig(validMinAppend({"--config-blocks", "x"})); },
+                            "unknown option");
+}
+
 TEST(parseLoadModel, helperOptionMissingValue) {
   expectConfigErrorContains([] { parseModelLoadConfig({"--model"}); }, "requires a value");
   expectConfigErrorContains([] { parseModelLoadConfig({"-m"}); }, "requires a value");
