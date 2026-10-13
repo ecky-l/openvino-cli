@@ -1,0 +1,185 @@
+<?xml version="1.0"?>
+<net name="Model9" version="11">
+	<layers>
+		<layer id="0" name="hidden_states" type="Parameter" version="opset1">
+			<data shape="?,?" element_type="f32" />
+			<output>
+				<port id="0" precision="FP32" names="hidden_states">
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="1" name="Constant_46750" type="Const" version="opset1">
+			<data element_type="i64" shape="5" offset="0" size="40" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>5</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="2" name="aten::view/Reshape" type="Reshape" version="opset1">
+			<data special_zero="false" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>-1</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>5</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="14,9,hidden_states_1,input">
+					<dim>-1</dim>
+					<dim>3</dim>
+					<dim>2</dim>
+					<dim>16</dim>
+					<dim>16</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="3" name="self.proj.weight" type="Const" version="opset1">
+			<data element_type="f32" shape="64, 3, 2, 16, 16" offset="40" size="393216" />
+			<output>
+				<port id="0" precision="FP32" names="self.proj.weight">
+					<dim>64</dim>
+					<dim>3</dim>
+					<dim>2</dim>
+					<dim>16</dim>
+					<dim>16</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="4" name="__module.proj/aten::_convolution/Convolution" type="Convolution" version="opset1">
+			<data strides="2, 16, 16" dilations="1, 1, 1" pads_begin="0, 0, 0" pads_end="0, 0, 0" auto_pad="explicit" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>3</dim>
+					<dim>2</dim>
+					<dim>16</dim>
+					<dim>16</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>64</dim>
+					<dim>3</dim>
+					<dim>2</dim>
+					<dim>16</dim>
+					<dim>16</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="5" name="__module.proj/aten::_convolution/Reshape" type="Const" version="opset1">
+			<data element_type="f32" shape="1, 64, 1, 1, 1" offset="393256" size="256" />
+			<output>
+				<port id="0" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="6" name="__module.proj/aten::_convolution/Add" type="Add" version="opset1">
+			<data auto_broadcast="numpy" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+				<port id="1" precision="FP32">
+					<dim>1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="33">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="7" name="Constant_46823" type="Const" version="opset1">
+			<data element_type="i64" shape="2" offset="393512" size="16" />
+			<output>
+				<port id="0" precision="I64">
+					<dim>2</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="8" name="aten::view/Reshape_1" type="Reshape" version="opset1">
+			<data special_zero="false" />
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+					<dim>1</dim>
+				</port>
+				<port id="1" precision="I64">
+					<dim>2</dim>
+				</port>
+			</input>
+			<output>
+				<port id="2" precision="FP32" names="last_hidden_state">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</output>
+		</layer>
+		<layer id="9" name="Result_46857" type="Result" version="opset1" output_names="last_hidden_state">
+			<input>
+				<port id="0" precision="FP32">
+					<dim>-1</dim>
+					<dim>64</dim>
+				</port>
+			</input>
+		</layer>
+	</layers>
+	<edges>
+		<edge from-layer="0" from-port="0" to-layer="2" to-port="0" />
+		<edge from-layer="1" from-port="0" to-layer="2" to-port="1" />
+		<edge from-layer="2" from-port="2" to-layer="4" to-port="0" />
+		<edge from-layer="3" from-port="0" to-layer="4" to-port="1" />
+		<edge from-layer="4" from-port="2" to-layer="6" to-port="0" />
+		<edge from-layer="5" from-port="0" to-layer="6" to-port="1" />
+		<edge from-layer="6" from-port="2" to-layer="8" to-port="0" />
+		<edge from-layer="7" from-port="0" to-layer="8" to-port="1" />
+		<edge from-layer="8" from-port="2" to-layer="9" to-port="0" />
+	</edges>
+	<rt_info>
+		<info name="OpenVINO Runtime" value="2026.3.1-22476-759c5a6ab8c-releases/2026/3" />
+		<Runtime_version value="2026.3.1-22476-759c5a6ab8c-releases/2026/3" />
+		<conversion_parameters>
+			<framework value="pytorch" />
+			<is_python_object value="True" />
+		</conversion_parameters>
+		<optimum>
+			<optimum_intel_version value="2.2.0.dev0+311f6a1" />
+			<optimum_version value="2.3.0" />
+			<pytorch_version value="2.14.0" />
+			<transformers_version value="5.2.0" />
+		</optimum>
+	</rt_info>
+</net>
