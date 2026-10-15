@@ -115,6 +115,14 @@ if(OVGENAI_BUILD_TESTS)
       OVGENAI_VLM_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/src/test/fixtures/tiny-random--qwen3.5-ov")
   endif()
 
+  # A real, check-in-able JPEG for the image-source test coverage -- baked absolute
+  # like the fixture, so a subprocess resolves it regardless of CWD; when it is
+  # absent at configure time the macro is not defined and that test file skips.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/test/fixtures/dog-237-536x354.jpg")
+    target_compile_definitions(ovgenai_tests PRIVATE
+      OVGENAI_VLM_IMAGE="${CMAKE_CURRENT_SOURCE_DIR}/src/test/fixtures/dog-237-536x354.jpg")
+  endif()
+
   include(GoogleTest)
   gtest_discover_tests(ovgenai_tests
     DISCOVERY_MODE POST_BUILD
