@@ -2,8 +2,9 @@
 //
 // The other pipeline subcommands still route through the shared runPipelineStub
 // (see commands.cpp); `vlm` is the first to get a genuine body: load a
-// vlmpipeline, take a request (a full chat on stdin for the default
-// `--apply-chat-template true`, or a raw `--prompt`/`--images` for `false`), and
+// vlmpipeline, take a request -- a chat from --input, or (when --input is
+// omitted) from stdin (a pipe -> one line; a terminal -> typed to a lone
+// '.', the mail command's way) -- and let the engine apply the model template, and
 // emit one JSON result object to stdout (the decoded text with special/protocol
 // tokens preserved, the engine's native finish_reason, and the perf metrics).
 //

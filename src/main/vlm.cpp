@@ -3,7 +3,12 @@
 //
 // The subcommand owns exactly the translation the design requires, and nothing
 // of the per-model *parsing* (that stays in the Python consumer):
-//   * the input switch -- --apply-chat-template [true|false] (default true);
+//   * the input surface -- one only: the chat comes from --input, otherwise from
+//     stdin (a pipe => one gen_config line; a terminal => typed line-by-line until
+//     a lone '.', the mail command's way);
+//   * an image part may carry a {"type":"image_url","url":...} that is a file
+//     ("file://.." / ~/ / absolute / relative to the CWD) or the built-in base64
+//     data: form;
 //   * the JSON -> ChatHistory + media-tensor translator (the one bit of real new
 //     code in the CLI): per image/video/audio part we (a) rewrite the content
 //     item to the engine's universal `{"type":"image"|"video"|"audio"}` and
@@ -49,11 +54,13 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <set>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 #include <vector>
 
 // A `po` alias at global scope; my vlm code lives in ovgenai (not ovgenai::config,
@@ -70,16 +77,6 @@ bool anyHelp(const std::vector<std::string>& a) {
   for (const auto& x : a)
     if (x == "--help" || x == "-h") return true;
   return false;
-}
-
-// Parse a true|false-ish string (the accepted spellings, case-insensitive).
-bool parseBoolFlag(const std::string& s, const char* what) {
-  std::string l;
-  l.reserve(s.size());
-  for (char c : s) l += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-  if (l == "true" || l == "1" || l == "yes" || l == "on") return true;
-  if (l == "false" || l == "0" || l == "no" || l == "off") return false;
-  throw config::ConfigError(std::string(what) + " expects true|false, got '" + s + "'");
 }
 
 // --- JSON construction helpers (hand-built, so I never fight Any/AnyMap/
@@ -121,18 +118,14 @@ void addStrMember(std::string& out, const std::string& key, const std::string& v
   out += "\"";
 }
 
-// Remove the vlm-only flags (and, for value-taking ones, their value token(s))
+// Remove the vlm-only flags (and, for the value-taking one, its value token)
 // from a copy of args, so the shared section parsers -- which do not know
-// --apply-chat-template / --prompt / --images / --worker -- will not reject them
-// as "unknown option".  `--apply-chat-template=X` / `--prompt=X` are dropped whole;
-// `--apply-chat-template X` / `--prompt X` drop the flag and its one value
-// (unless that value is itself an option); `--images` drops the flag and every
-// following positional value up to the next option; `--worker` is a zero-arg
-// flag, so it is dropped on its own.
+// --input / --worker -- will not reject them as "unknown option".  `--input=X` /
+// `-i=X` are dropped whole; `--input X` / `-i X` drop the flag and its one value
+// (unless that value is itself an option); `--worker` is a zero-arg flag, so it
+// is dropped on its own.
 std::vector<std::string> stripVlmArgs(const std::vector<std::string>& args) {
-  static const std::set<std::string> kSingle = {"--apply-chat-template", "-t",
-                                                "--prompt", "-p"};
-  const std::string kImages = "--images";
+  static const std::set<std::string> kSingle = {"--input", "-i"};
   std::vector<std::string> out;
   bool afterDashDash = false;
   for (size_t i = 0; i < args.size(); ) {
@@ -140,8 +133,7 @@ std::vector<std::string> stripVlmArgs(const std::vector<std::string>& args) {
     if (!afterDashDash && tok == "--") { out.push_back(tok); afterDashDash = true; ++i; continue; }
     if (afterDashDash) { out.push_back(tok); ++i; continue; }  // positionals pass through
     if (tok == "--worker") { ++i; continue; }   // zero-arg flag; only the first pass knows it
-    if (tok.rfind("--apply-chat-template=", 0) == 0 || tok.rfind("-t=", 0) == 0 ||
-        tok.rfind("--prompt=", 0) == 0 || tok.rfind("-p=", 0) == 0) {
+    if (tok.rfind("--input=", 0) == 0 || tok.rfind("-i=", 0) == 0) {
       ++i;                                                    // the =form is one token
       continue;
     }
@@ -149,16 +141,6 @@ std::vector<std::string> stripVlmArgs(const std::vector<std::string>& args) {
       if (i + 1 < args.size()) {
         const std::string& nx = args[i + 1];
         if (!(nx.size() > 1 && nx[0] == '-')) ++i;            // consume its (space) value
-      }
-      ++i;
-      continue;
-    }
-    if (tok == kImages) {
-      ++i;                                                    // the --images flag
-      while (i + 1 < args.size()) {
-        const std::string& nx = args[i + 1];
-        if (nx == "--" || (nx.size() > 1 && nx[0] == '-')) break;
-        ++i;                                                  // consume its value tokens
       }
       ++i;
       continue;
@@ -195,6 +177,40 @@ std::size_t protocolLineLimit() {
 #endif
 }
 
+// Read chat input a line at a time from a terminal, the classic mail(1) way: a
+// line that is a lone '.' (and nothing else) ends the input and is not part of
+// it; every earlier line is kept (each with its trailing newline, so a
+// pretty-printed chat JSON is reassembled verbatim).  EOF before a lone '.' also
+// ends the input (whatever was typed is used).  std::getline grows the string, so
+// a long single line is fine -- the lone '.' is what bounds an interactive
+// session, not a byte cap.
+std::string readMailInput() {
+  std::string acc;
+  std::string line;
+  while (std::getline(std::cin, line)) {
+    if (line == ".") break;
+    acc += line;
+    acc.push_back('\n');
+  }
+  return acc;
+}
+
+// Acquire the one-shot chat input -- the precedent (req 2 + 3):
+//   A. --input given  -> return its value verbatim; read NO stdin at all.
+//   B. --input absent AND stdin is NOT a tty (a pipe / redirect) -> one (possibly
+//      huge) line, the OpenArc gen_config one-line form (the same reader the
+//      --worker loop uses).
+//   C. --input absent AND stdin IS a tty (nothing piped) -> read the chat from the
+//      command line until a lone '.', the mail command's way.
+// A is decided first, so a present --input never touches stdin (req 2); the isatty
+// probe runs only when --input was omitted (req 3 is the "nothing piped" case).
+// An empty result is fine: executeRequest reports "no message".
+std::string acquireInput(const std::optional<std::string>& cliInput) {
+  if (cliInput.has_value()) return *cliInput;                      // A: --input given
+  if (isatty(STDIN_FILENO)) return readMailInput();                // C: a terminal
+  return readOneLine(std::cin, protocolLineLimit());               // B: piped -> one line
+}
+
 // The base64 payload of a data: URL -- strip a "data:image/..;base64," prefix if
 // present, else treat the whole string (a bare base64 blob) as the payload.
 std::string dataUrlBase64(const std::string& url) {
@@ -221,36 +237,55 @@ ov::Tensor makeImageTensorFromBytes(const std::string& bytes) {
   return t;
 }
 
-ov::Tensor imageTensorFromDataUrl(const std::string& url) {
-  return makeImageTensorFromBytes(base64_decode(dataUrlBase64(url)));
+// Expand a leading '~' (== $HOME) or '~/...' to a full home path; anything else
+// is used as-is (an absolute '/...' path, or one relative to the CWD).  util's
+// env_or is the shared $HOME lookup; an unset/empty HOME with a '~' is a ConfigError.
+std::string expandTilde(const std::string& path) {
+  if (path == "~" || path.rfind("~/", 0) == 0) {
+    std::string home = env_or("HOME", std::string());
+    if (home.empty())
+      throw config::ConfigError("vlm: image '" + path + "' uses ~ but $HOME is not set");
+    if (path == "~") return home;
+    return home + path.substr(1);                                 // keep the leading '/'
+  }
+  return path;
 }
 
-ov::Tensor imageTensorFromPath(const std::string& path) {
+// Resolve the *source* of an image part's url and decode it to an ov::Tensor
+// [N,H,W,3] (uint8).  The url is one of, in priority order (req 4):
+//   * "data:<mime>;base64,XXX"  -> the built-in mime-type / base64 form: base64-
+//                                   decode the payload (kept, in addition).
+//   * a "file://..." URL        -> strip the scheme, resolve the rest as a path.
+//   * "~" / "~/..."             -> expand ~ to $HOME, then read the file.
+//   * an absolute "/..." / a relative (to the CWD) path -> read the file.
+// openvino.genai exports no image-format decoder, so the (read / decoded) bytes
+// are kept as a [1,1,1,3] placeholder tensor -- enough to keep the image-part /
+// image-tensor count one-to-one (so the engine's vision-index invariant holds)
+// without a real raster decode; a real decoder is a later enhancement.  The first
+// time any image is seen a transparent note is logged once (not hidden).
+ov::Tensor imageTensorFromUrlOrPath(const std::string& url) {
   std::string bytes;
-  if (path.rfind("data:", 0) == 0) {
-    bytes = base64_decode(dataUrlBase64(path));
+  if (url.rfind("data:", 0) == 0) {
+    // the built-in base64 form (mime type + base64 payload).
+    bytes = base64_decode(dataUrlBase64(url));
   } else {
+    // a file form: "file://" / "~" / "~/" / absolute / relative-to-CWD.
+    std::string path = (url.rfind("file://", 0) == 0) ? url.substr(7) : url;
+    path = expandTilde(path);
     std::ifstream f(path.c_str(), std::ios::binary);
-    if (f) {
-      std::stringstream ss; ss << f.rdbuf();
-      bytes = ss.str();
-    } else {
-      throw config::ConfigError("vlm: could not open --images file '" + path + "'");
-    }
+    if (!f) throw config::ConfigError("vlm: could not open image file '" + url + "'");
+    std::stringstream ss; ss << f.rdbuf();
+    bytes = ss.str();
+  }
+  static bool warned = false;                                     // once, regardless of source
+  if (!warned) {
+    warned = true;
+    std::fprintf(stderr,
+                 "ovgenai: vlm: image pixel-decoding is not yet wired "
+                 "(openvino.genai exports no image-format decoder); "
+                 "decoding to a [1,1,1,3] placeholder tensor for now\n");
   }
   return makeImageTensorFromBytes(bytes);
-}
-
-std::vector<ov::Tensor> decodeImagePaths(const std::vector<std::string>& paths) {
-  if (paths.empty()) return {};
-  std::fprintf(stderr,
-               "ovgenai: vlm: image pixel-decoding is not yet wired "
-               "(openvino.genai exports no image-format decoder); "
-               "decoding to a [1,1,1,3] placeholder tensor for now\n");
-  std::vector<ov::Tensor> out;
-  out.reserve(paths.size());
-  for (const auto& p : paths) out.push_back(imageTensorFromPath(p));
-  return out;
 }
 
 // --- the request -> normalised ChatHistory + media translator -----------------
@@ -318,7 +353,7 @@ std::string serializeMessage(const rapidjson::Value& m, ParsedRequest& pr) {
               parts += "{\"type\":\"image\"}";
               ps = 1;
               if (pit->IsObject() && pit->HasMember("url") && (*pit)["url"].IsString())
-                pr.images.push_back(imageTensorFromDataUrl(std::string((*pit)["url"].GetString())));
+                pr.images.push_back(imageTensorFromUrlOrPath(std::string((*pit)["url"].GetString())));
               else
                 pr.images.push_back(makeImageTensorFromBytes(std::string()));
             } else if (ptype == "video_url" || ptype == "video") {
@@ -396,11 +431,6 @@ ParsedRequest translateGenConfig(const rapidjson::Value& g) {
       out += serializeMessage(*it, pr);
       ms = 1;
     }
-  } else {
-    // a "prompt"-only request: a single synthetic user message.
-    auto pk = g.FindMember("prompt");
-    if (pk != g.MemberEnd() && !pk->value.IsNull() && pk->value.IsString())
-      out += std::string("{\"role\":\"user\",\"content\":\"") + jsonEscape(pk->value.GetString()) + "\"}";
   }
   out += "]";
   pr.normMessagesJson = out;
@@ -537,50 +567,32 @@ void emitWorkerError(const std::string& msg, std::int64_t reqId = 0) {
 }
 
 // The core one-request driver shared by the one-shot and worker forms.
-// `inputJson` carries the conversation (gen_config) for the default-engine and
-// pre-apply/keyword paths (for a one-shot this is the line read from stdin, or a
-// synthesised single message when --prompt is used as a fallback); for raw mode
-// the caller leaves it empty and passes `cliPrompt` + `cliImages` instead.
-// `reqConfig` is the *sampling* for this one request (CLI-derived for a one-shot;
-// gen_config-derived for a worker GENERATE).
+// `inputJson` carries the conversation (a full chat, gen_config shape): for a
+// one-shot this is the acquiried input (the --input value when given, or -- when
+// --input is omitted -- the chat read from stdin); for a worker GENERATE it is
+// that request's gen_config, echoed compactly.  `reqConfig` is the *sampling* for
+// this one request (CLI-derived for a one-shot; gen_config-derived for a worker
+// GENERATE).  Input is always a chat the model's template is applied to -- there
+// is no raw / no-template path.
 int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
                    const ovgenai::config::ModelRequestConfig& reqConfig,
-                   bool applyChatTemplateFlag,
                    const std::string& inputJson,
-                   const std::string& cliPrompt,
-                   const std::vector<ov::Tensor>& cliImages,
                    bool isWorker, std::int64_t reqId) {
-  // Build the base GenerationConfig from the per-request sampling (concern a is
-  // applied per-branch below, since the switch decides which path runs).
+  // Build the base GenerationConfig from the per-request sampling (the
+  // apply_chat_template gate is set per-branch below -- the (tools|kwargs)
+  // sub-rule decides whether the engine or the CLI applies the model template).
   ov::genai::GenerationConfig cfg = makeGenerationConfig(reqConfig);
 
-  if (!applyChatTemplateFlag) {
-    // --- raw mode (flag false): the STRING path, apply_chat_template = false.
-    // The engine does NOT wrap the prompt in chat roles, but its own media-tag
-    // splice still prepends one native tag per provided image (so a plain prompt
-    // + N --images works), giving "give me a raw prompt, no chat-role wrapping".
-    if (cliPrompt.empty())
-      throw config::ConfigError("vlm: --apply-chat-template false requires --prompt");
-    cfg.apply_chat_template = false;
-    std::string acc;
-    auto streamer = makeAccumulatingStreamer(tokenizer, acc);
-    auto res = pipe.generate(cliPrompt, cliImages, cfg, ov::genai::StreamerVariant(streamer));
-    emitResult(isWorker, reqId, acc, res, reqConfig);
-    return 0;
-  }
-
-  // --- default branch (flag true): decide engine (history) vs pre-apply (string).
+  // The one input surface: parse the (possibly multi-line) chat as a gen_config
+  // and translate it to a normalised ChatHistory + media tensors.  An empty input
+  // leaves the messages "[]" so the engine path reports "no message".
   ParsedRequest pr;
   if (!inputJson.empty()) {
     rapidjson::Document g;
     if (g.Parse<0>(inputJson.c_str()).HasParseError())
-      throw config::ConfigError("vlm: request is not valid JSON at position " +
+      throw config::ConfigError("vlm: input is not valid JSON at position " +
                                  std::to_string(g.GetErrorOffset()));
     pr = translateGenConfig(g);
-  } else if (!cliPrompt.empty()) {
-    // --prompt fallback under the default (true) surface: a single user message.
-    pr.normMessagesJson = std::string("[{\"role\":\"user\",\"content\":\"") +
-                          jsonEscape(cliPrompt) + "\"}]";
   }
 
   bool useEngineTemplate = !(pr.hasTools || pr.hasKwargs);   // the (tools|kwargs) sub-rule
@@ -616,8 +628,9 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
   // already put in the content parts), so we just pass the history + media.
   cfg.apply_chat_template = true;
   if (pr.normMessagesJson.empty() || pr.normMessagesJson == "[]")
-    throw config::ConfigError("vlm: no message to generate for "
-                              "(pipe a chat on stdin, or pass --prompt)");
+    throw config::ConfigError("vlm: no message to generate -- give a chat via --input,"
+                              " pipe one on stdin, or type one at a terminal (a lone"
+                              " '.' ends the input, as in the mail command)");
   ov::genai::ChatHistory history(ov::genai::JsonContainer::from_json_string(pr.normMessagesJson));
   std::string acc;
   auto streamer = makeAccumulatingStreamer(tokenizer, acc);
@@ -627,34 +640,16 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
   return 0;
 }
 
-// The one-shot form: read the input surface per the switch, then drive
-// executeRequest.  For the default (true) surface the conversation is a full chat
-// on stdin (OpenArc gen_config shape), or --prompt as a single-message fallback;
-// for raw (false) the prompt is --prompt (+ --images).
+// The one-shot form: acquire the chat input (acquireInput -- --input, or, when
+// omitted, piped stdin / an interactive terminal read to a lone '.'), then drive
+// the single executeRequest path.  A present --input is used verbatim (req 2, no
+// stdin read); an over-limit piped line or a missing input surfaces as a
+// ConfigError that propagates up to runVlm's catch.
 int runOneShotInner(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
                     const ovgenai::config::ModelRequestConfig& reqConfig,
-                    bool applyChatTemplateFlag,
-                    const std::string& cliPrompt,
-                    const std::vector<std::string>& cliImagePaths) {
-  if (!applyChatTemplateFlag) {
-    // raw mode: the string path; --prompt required, --images decoded + passed.
-    if (cliPrompt.empty())
-      throw config::ConfigError("vlm: --apply-chat-template false requires --prompt");
-    std::vector<ov::Tensor> cliImages = decodeImagePaths(cliImagePaths);
-    return executeRequest(pipe, tokenizer, reqConfig, applyChatTemplateFlag,
-                          /*inputJson=*/std::string(), cliPrompt, cliImages,
-                          /*isWorker=*/false, /*reqId=*/0);
-  }
-  // default (true) surface: read one (possibly large) line from stdin.
-  std::string inputLine;
-  try {
-    inputLine = readOneLine(std::cin, protocolLineLimit());
-  } catch (const config::ConfigError& e) {
-    throw;                                 // propagates to runVlm's catch
-  }
-  std::string inputJson = inputLine;
-  return executeRequest(pipe, tokenizer, reqConfig, applyChatTemplateFlag,
-                        inputJson, cliPrompt, std::vector<ov::Tensor>{},
+                    const std::optional<std::string>& cliInput) {
+  const std::string input = acquireInput(cliInput);
+  return executeRequest(pipe, tokenizer, reqConfig, input,
                         /*isWorker=*/false, /*reqId=*/0);
 }
 
@@ -667,8 +662,7 @@ int runOneShotInner(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer
 // the same executeRequest path as the one-shot, so streamed + native-
 // finish-reason output is identical in both forms.
 int runWorker(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
-              const ovgenai::config::ModelRequestConfig& baseReq,
-              bool applyChatTemplateFlag) {
+              const ovgenai::config::ModelRequestConfig& baseReq) {
   emitWorkerLine("READY");
   const std::size_t limit = protocolLineLimit();
   for (;;) {
@@ -710,9 +704,7 @@ int runWorker(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
       if (!genConfigStr.empty())
         reqConfig = config::modelRequestConfigFromJson(genConfigStr);
       try {
-        executeRequest(pipe, tokenizer, reqConfig, applyChatTemplateFlag,
-                        genConfigStr, /*cliPrompt=*/std::string(),
-                        /*cliImages=*/std::vector<ov::Tensor>{},
+        executeRequest(pipe, tokenizer, reqConfig, genConfigStr,
                         /*isWorker=*/true, reqId);
       } catch (const config::ConfigError& e) {
         emitWorkerError(e.what(), reqId);
@@ -737,10 +729,12 @@ std::string vlmHelp(const std::string& prog, bool withWorker) {
   d += "  Run a vision-language pipeline (VLMPipeline). One-shot by default;\n";
   d += "  add --worker for the long-lived piped-worker form.\n\n";
   d += "A positional <model-dir> is a friend for --model when it is the only\n";
-  d += "model. The input surface is chosen by --apply-chat-template:\n";
-  d += "  true  (default): read a full chat JSON object on stdin and let the\n";
-  d += "        engine apply the model chat template.\n";
-  d += "  false: treat --prompt (+ --images) as a raw prompt (no chat roles).\n\n";
+  d += "model. The input is always a chat the model's template is applied to; it is\n";
+  d += "  taken from --input when given, otherwise from stdin: a pipe -> one line,\n";
+  d += "a terminal -> typed line-by-line, a lone '.' ending it (as in mail).\n";
+  d += "An image part may come from a file (\"file://..\" / ~ / absolute / relative to\n";
+  d += "the CWD) or the built-in base64 / data: form. --input is for one-shot (not\n";
+  d += "the --worker form).\n\n";
   std::ostringstream os;
   os << vlmOptionsDesc(withWorker, worker);   // boost renders the section
   d += os.str();
@@ -754,22 +748,14 @@ po::options_description vlmOptionsDesc(bool withWorker, bool& worker) {
   s.add(config::ModelSchedulerConfig::schedulerOptionsDesc());
   s.add(config::ModelRequestConfig::requestOptionsDesc());
   s.add_options()
-    ("apply-chat-template,t", po::value<std::string>()->default_value("true"),
-        "Input surface switch (default true). true  = read a full chat as a JSON"
-        " object on stdin (OpenArc gen_config shape) and let the engine apply the"
-        " model chat template; false = use --prompt (+ --images) as a raw prompt,"
-        " no chat-role wrapping (the model's native vision tokens are still spliced"
-        " for the images). A request that itself carries a chat-template / tools"
-        " block takes a pre-apply path (the template is applied here, in C++, and"
-        " the resulting string is generated with the gate off) even under true.")
-    ("prompt,p", po::value<std::string>(),
-        "Raw prompt for --apply-chat-template false (also a stdin-less fallback"
-        " for the default true surface, as a single user message). A lone"
-        " positional model arg still maps to --model.")
-    ("images", po::value<std::vector<std::string>>(),
-        "Image path(s) / data-URLs for raw mode; each becomes an image tensor the"
-        " engine splices in. Image pixel-decoding is not yet wired (openvino.genai"
-        " exports no image-format decoder), so this is a placeholder today.");
+    ("input,i", po::value<std::string>(),
+        "The chat to run, as a direct (chat-templated) input -- a gen_config JSON"
+        " object ({\"messages\":[...], optionally \"tools\" / \"chat_template_kwargs\"}"
+        " in the OpenArc shape). When given, no stdin is read. When omitted, the chat"
+        " is read from stdin: a pipe yields one (possibly large) line, an interactive"
+        " terminal is read a line at a time until a lone '.', the mail command's way."
+        " An image part may carry a url that is a file (\"file://..\" / ~ / absolute"
+        " / relative to the CWD) or the built-in data: / base64 form.");
   if (withWorker)
     s.add_options()("worker", po::bool_switch(&worker),
                      "Run as a long-lived worker subprocess: stay up and read/write"
@@ -811,18 +797,12 @@ int runVlm(const std::string& prog, const std::vector<std::string>& args) {
   // model/device straight from pass 1 (for the label emitted before loading).
   std::string model = vm.count("model") ? vm["model"].as<std::string>() : std::string();
   std::string device = vm.count("device") ? vm["device"].as<std::string>() : std::string();
-  std::string actStr =
-      vm.count("apply-chat-template") ? vm["apply-chat-template"].as<std::string>() : "true";
-  bool applyChatTemplate;
-  try {
-    applyChatTemplate = parseBoolFlag(actStr, "--apply-chat-template");
-  } catch (const config::ConfigError& e) {
-    std::fprintf(stderr, "ovgenai: vlm: %s\n", e.what());
-    return 2;
-  }
-  std::string cliPrompt = vm.count("prompt") ? vm["prompt"].as<std::string>() : std::string();
-  std::vector<std::string> cliImagePaths =
-      vm.count("images") ? vm["images"].as<std::vector<std::string>>() : std::vector<std::string>();
+  // --input (optional): the direct chat input; when absent a chat is read from
+  // stdin instead (see acquireInput).  --input is a no-op for the --worker form
+  // (which reads its line-JSON protocol from stdin), so it is only forwarded to
+  // the one-shot branch below.
+  std::optional<std::string> cliInput =
+      vm.count("input") ? std::optional<std::string>(vm["input"].as<std::string>()) : std::nullopt;
 
   // Emit the mode+model label up front (mirrors the other pipelines' stub), so
   // the mode is visible on stderr even if a later step (e.g. load) then fails.
@@ -847,9 +827,8 @@ int runVlm(const std::string& prog, const std::vector<std::string>& args) {
     ov::genai::Tokenizer tokenizer = pipeline.get_tokenizer();
 
     if (worker)
-      return runWorker(pipeline, tokenizer, reqConfig, applyChatTemplate);
-    return runOneShotInner(pipeline, tokenizer, reqConfig, applyChatTemplate,
-                           cliPrompt, cliImagePaths);
+      return runWorker(pipeline, tokenizer, reqConfig);
+    return runOneShotInner(pipeline, tokenizer, reqConfig, cliInput);
   } catch (const config::ConfigError& e) {
     std::fprintf(stderr, "ovgenai: vlm: %s\n", e.what());
     return 2;

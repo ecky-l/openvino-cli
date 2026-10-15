@@ -142,8 +142,8 @@ TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
   // --worker omitted -> `vlm` is the first pipeline with a REAL body: it loads a
   // VLMPipeline and generates, so it needs a genuine (random-weight) VLM model --
   // NOT the LLM tiny-gpt2-ov used for the llm check above -- plus something to
-  // generate (a --prompt, because this runner feeds /dev/null on stdin, which the
-  // default surface reads as "no message").  A clean run is rc 0, reports
+  // generate, via --input (this runner feeds /dev/null on stdin, which now is
+  // simply not read while --input is present).  A clean run is rc 0, reports
   // "one-shot", logs the model, and emits a result line; an un-exec'able box /
   // a missing fixture skips rather than fails.
 #if defined(OVGENAI_VLM_FIXTURE)
@@ -151,7 +151,8 @@ TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
     std::string vout, verr;
     int rc = runOvgenai(
         {"vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU",
-         "--prompt", "hi", "--max-tokens", "4"},
+         "--input", "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+         "--max-tokens", "4"},
         &vout, &verr);
     if (rc == -1)
       GTEST_SKIP() << "ovgenai could not exec here (run ctest under `eval $(./setupenv.sh)`)";
