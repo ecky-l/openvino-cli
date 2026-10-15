@@ -9,6 +9,7 @@
 // parser splices them in.
 #include "model_load_config.hpp"
 #include "config.hpp"
+#include "util.hpp"                     // resolveModelPath -- fold an `hf://` model to its cache snapshot dir
 #include "model_runtime_config.hpp"    // the runtime section, spliced into our parse
 #include "model_scheduler_config.hpp"  // the scheduler section, spliced into our parse
 #include "model_request_config.hpp"    // the request section, spliced into our parse
@@ -36,6 +37,14 @@ namespace {
 //             empty -> finalize() reports it missing.
 //   * device -- validated against the k-enums.
 void finalize(ModelLoadConfig& cfg) {
+  // Fold an `hf://<name>` model to its concrete snapshot dir here: every consumer
+  // (the real load, `show-config`, a `LOAD` message) then shares one resolved path
+  // -- the single source of truth.  A plain (non-`hf://`) model is returned
+  // verbatim by resolveModelPath, so the "missing required option(s)" handling
+  // below is unchanged for the common case.  A model that is not (fully) in the
+  // cache is not downloaded; resolveModelPath throws a ConfigError the front-ends
+  // surface on stderr, telling the operator the exact `hf download <name>` to run.
+  cfg.model = ovgenai::resolveModelPath(cfg.model);
   std::vector<std::string> missing;
   if (cfg.model.empty()) missing.push_back("--model");
   if (cfg.device.empty()) missing.push_back("--device");

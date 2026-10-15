@@ -820,6 +820,14 @@ int runVlm(const std::string& prog, const std::vector<std::string>& args) {
     ovgenai::config::ModelSchedulerConfig schedConfig = config::parseModelSchedulerConfig(strip);
     ovgenai::config::ModelRuntimeConfig  runtimeConfig = config::parseModelRuntimeConfig(strip);
 
+    // The up-front label carries the *requested* model (an `hf://` ref, a repo
+    // name); for a resolved ref that is not the path actually loaded, report where
+    // it resolved (its snapshot dir) so a long load is identifiable.  A plain model
+    // path is returned verbatim by the fold, so this stays silent for the common case.
+    if (model.rfind("hf://", 0) == 0 && model != loadConfig.model)
+      std::fprintf(stderr, "ovgenai: vlm: resolved %s -> %s\n",
+                   model.c_str(), loadConfig.model.c_str());
+
     // -- Load the pipeline (throws on a missing / non-VLM model -- a run failure,
     // surfaced below).
     GenAIPipelineConfig pcfg(loadConfig, schedConfig, runtimeConfig);
