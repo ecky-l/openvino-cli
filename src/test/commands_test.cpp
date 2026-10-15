@@ -237,6 +237,14 @@ TEST(ovgenai_commands, everyPipelineRunsOneShotAndWorkerWithModelAndDevice) {
   const std::vector<Subcommand>& e = subcommandTable().entries();
   for (const Subcommand& s : e) {
     if (s.category != "pipeline") continue;
+    // `vlm` is the first pipeline with a real body -- it loads a VLMPipeline and
+    // generates -- so it cannot accept this placeholder /opt/m (which does not
+    // even exist) in a universal loop; its real one-shot + worker flow against the
+    // committed random-weight fixture is exercised by the companion subprocess
+    // test in worker_cli_test.cpp (whose runner redirects stdin to /dev/null, so a
+    // genuine vlm run does not block on a stdin read).  The shape / snapshot /
+    // per-subcommand --help tests still cover vlm as a registered pipeline.
+    if (s.name == "vlm") continue;
     // a valid one-shot run resolves the model to stderr and exits 0
     DispatchResult os = runDispatch({s.name, "--model", "/opt/m", "--device", "CPU"});
     EXPECT_EQ(os.rc, 0) << s.name << " one-shot";

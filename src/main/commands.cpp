@@ -18,6 +18,7 @@
 #include "model_runtime_config.hpp"  // parseModelRuntimeConfig + runtimeOptionsDesc
 #include "model_scheduler_config.hpp"// parseModelSchedulerConfig + schedulerOptionsDesc
 #include "model_request_config.hpp"  // parseModelRequestConfig + requestOptionsDesc
+#include "vlm.hpp"                    // runVlm -- the first real pipeline body
 
 #include "ovgenai_config.h"          // OVGENAI_VERSION
 
@@ -289,7 +290,9 @@ SubcommandTable::SubcommandTable() {
     const std::string desc = p.desc;
     m_entries.push_back(Subcommand{
         name, "pipeline", desc,
-        [name, desc](const std::string& prog, const std::vector<std::string>& a) {
+        [name, desc](const std::string& prog, const std::vector<std::string>& a) -> int {
+          if (name == "vlm")
+            return ovgenai::runVlm(prog, a);   // vlm is the first real body
           return runPipelineStub(name, desc, prog, a);
         }});
   }

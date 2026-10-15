@@ -83,7 +83,7 @@ std::string joinList(const std::vector<std::string>& v, const std::string& sep);
 
 // Re-serialize any parsed/constructed JSON value compactly (used to canonicalize
 // the free-form JSON blobs that travel between argv and JSON).
-std::string compactJsonOf(rapidjson::Value& v);
+std::string compactJsonOf(const rapidjson::Value& v);
 
 // A JSON string that must be a JSON *object*, re-emitted compactly; an
 // absent / malformed / non-object value is a ConfigError mentioning `flag`.

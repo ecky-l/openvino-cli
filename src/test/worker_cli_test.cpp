@@ -14,6 +14,7 @@
 
 #if defined(OVGENAI_WORKER_BIN)
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -138,12 +139,33 @@ TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
        0);
   EXPECT_NE(err.find("worker mode"), std::string::npos);
   EXPECT_NE(err.find("/tiny-gpt2-ov"), std::string::npos);
-  // --worker omitted -> the stub reports "one-shot", model still logged:
-  EXPECT_EQ(runOvgenai({"vlm", "--model", "./tiny-gpt2-ov", "--device", "CPU"},
-                      &out, &err),
-            0);
-  EXPECT_NE(err.find("one-shot"), std::string::npos);
-  EXPECT_NE(err.find("/tiny-gpt2-ov"), std::string::npos);
+  // --worker omitted -> `vlm` is the first pipeline with a REAL body: it loads a
+  // VLMPipeline and generates, so it needs a genuine (random-weight) VLM model --
+  // NOT the LLM tiny-gpt2-ov used for the llm check above -- plus something to
+  // generate (a --prompt, because this runner feeds /dev/null on stdin, which the
+  // default surface reads as "no message").  A clean run is rc 0, reports
+  // "one-shot", logs the model, and emits a result line; an un-exec'able box /
+  // a missing fixture skips rather than fails.
+#if defined(OVGENAI_VLM_FIXTURE)
+  if (::access(OVGENAI_VLM_FIXTURE, F_OK) == 0) {
+    std::string vout, verr;
+    int rc = runOvgenai(
+        {"vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU",
+         "--prompt", "hi", "--max-tokens", "4"},
+        &vout, &verr);
+    if (rc == -1)
+      GTEST_SKIP() << "ovgenai could not exec here (run ctest under `eval $(./setupenv.sh)`)";
+    else if (rc != 0)
+      FAIL() << "vlm real one-shot exited " << rc << " (stderr):\n" << verr;
+    EXPECT_NE(verr.find("one-shot"), std::string::npos);
+    EXPECT_NE(verr.find("tiny-random--qwen3.5-ov"), std::string::npos);
+    EXPECT_NE(vout.find("\"finish_reason\""), std::string::npos);
+  } else {
+    GTEST_SKIP() << "baked VLM fixture path is gone at runtime";
+  }
+#else
+  GTEST_SKIP() << "OVGENAI_VLM_FIXTURE was not baked at configure time";
+#endif
 }
 
 #else  // OVGENAI_WORKER_BIN not defined at configure time

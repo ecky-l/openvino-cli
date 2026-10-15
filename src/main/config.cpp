@@ -141,7 +141,7 @@ std::string joinList(const std::vector<std::string>& v, const std::string& sep) 
 
 // Re-serialize any parsed/constructed value compactly (used to canonicalize
 // the free-form JSON blobs that travel between argv and JSON).
-std::string compactJsonOf(rapidjson::Value& v) {
+std::string compactJsonOf(const rapidjson::Value& v) {
   rapidjson::StringBuffer sb;
   rapidjson::Writer<rapidjson::StringBuffer> w(sb);
   v.Accept(w);

@@ -105,6 +105,16 @@ if(OVGENAI_BUILD_TESTS)
   target_compile_definitions(ovgenai_tests PRIVATE
     OVGENAI_WORKER_BIN="${CMAKE_CURRENT_BINARY_DIR}/ovgenai")
 
+  # A real (random-weight) VLM pipeline to exercise the now-genuine `vlm` body
+  # end-to-end (the committed tiny-random--qwen3.5-ov fixture): baked absolute,
+  # like the worker path, so a subprocess test resolves it regardless of CWD; when
+  # the fixture is absent at configure time the macro is simply not defined and the
+  # test skips (as ovgenaiRuns() makes it do when the box cannot exec).
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/test/fixtures/tiny-random--qwen3.5-ov/config.json")
+    target_compile_definitions(ovgenai_tests PRIVATE
+      OVGENAI_VLM_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/src/test/fixtures/tiny-random--qwen3.5-ov")
+  endif()
+
   include(GoogleTest)
   gtest_discover_tests(ovgenai_tests
     DISCOVERY_MODE POST_BUILD
