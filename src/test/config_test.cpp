@@ -56,9 +56,16 @@ TEST(parseLoadModel, minimalLongFlagsDerivesName) {
   // config,  so it is no longer a load optional):
   EXPECT_FALSE(c.draft_model.has_value());
   EXPECT_EQ(c.draft_device, std::optional<std::string>("CPU"));
+  // validMin() carries --model (load requires it) but no --cache-dir, so the new
+  // cache_dir *default* fires: this minimal runtime config is no longer all-unset --
+  // it holds cache_dir = <model-dir>/model_cache  (that is the feature, by request;
+  // before the default a truly-minimal runtime config was all-nullopt, and that is
+  // still asserted where no --model is given, e.g. the explicit-empty and no-model
+  // cases in cache_dir_default_test.cpp).
   auto rt = parseModelRuntimeConfig(validMin());
-  EXPECT_FALSE(rt.cache_dir.has_value());  // cache_dir now lives on the runtime config
-  EXPECT_FALSE(rt.hasAnySet());  // runtime is its own config; minimal -> all unset
+  ASSERT_TRUE(rt.cache_dir.has_value());
+  EXPECT_EQ(*rt.cache_dir, std::string("/opt/qwen3-8b/model_cache"));
+  EXPECT_TRUE(rt.hasAnySet());
   // The scheduler is now its own config; a minimal invocation leaves it all-nullopt.
   auto sc = parseModelSchedulerConfig(validMin());
   EXPECT_FALSE(sc.hasAnySet());

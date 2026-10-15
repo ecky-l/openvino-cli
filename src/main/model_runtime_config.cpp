@@ -18,6 +18,7 @@
 // "known",  not "unknown option").
 #include "model_runtime_config.hpp"
 #include "config.hpp"
+#include "util.hpp"                    // resolveModelPath — the model-dir default for cache_dir
 #include "model_load_config.hpp"       // the load section, spliced into our parse
 #include "model_scheduler_config.hpp"  // the scheduler section, spliced into our parse
 #include "model_request_config.hpp"    // the request section, spliced into our parse
@@ -471,6 +472,31 @@ ModelRuntimeConfig parseModelRuntimeConfig(const std::vector<std::string>& args)
   readBool("enable-mmap",            cfg.enable_mmap);
   readBool("enable-weightless",      cfg.enable_weightless);
   readBool("force-tbb-terminate",    cfg.force_tbb_terminate);
+
+  // The one model-dependent runtime default: when --cache-dir is NOT given but
+  // --model is, default the plugin compile/cache dir to a subdirectory
+  // "model_cache" within the model's own dir --
+  //    --cache-dir (unset)  ->  resolveModelPath(--model) + "/model_cache"
+  // so the model's local cache sits co-located with the model itself.  The model
+  // is resolved FIRST (an `hf://...` --model folds to its real `.../snapshots/<hash>`
+  // dir, so no literal `hf://.../model_cache` path ever appears); a plain path
+  // resolves verbatim.  The result lands in this runtime config's `cache_dir`, so
+  // it flows out via toProperties()/toJson() as the CACHE_DIR property, and --
+  // threaded to the pipeline constructor (GenAIPipelineConfig::toPipelineProperties
+  // seeds its AnyMap from runtime_.toProperties(), which the VLMPipeline /
+  // LLMPipeline constructor receives as the `properties` arg passed on to
+  // ov::Core::compile_model()) -- through to the model at load time.
+  //
+  // "not given" is detected here via vm.count, not via the field: an explicit
+  // --cache-dir (including an empty "" that means "disable caching") and an absent
+  // one both land at nullopt after the reads above and are otherwise indistinguishable,
+  // so a default keying off the field would wrongly overwrite an operator's
+  // explicit --cache-dir "" -- the one state the operator can opt out of caching with.
+  if (!vm.count("cache-dir") && vm.count("model")) {
+    const std::string model = vm["model"].as<std::string>();
+    if (!model.empty())
+      cfg.cache_dir = ovgenai::resolveModelPath(model) + "/model_cache";
+  }
   return cfg;
 }
 
