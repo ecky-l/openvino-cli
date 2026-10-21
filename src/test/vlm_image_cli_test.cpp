@@ -77,6 +77,25 @@ std::string chatWithImage(const std::string& uri) {
        + "{\"type\":\"image_url\",\"url\":\"" + uri + "\"}]}]}";
 }
 
+// The same one-user-message text+image chat as chatWithImage, but pretty-printed
+// across many lines and delivered on piped stdin: a document whose JSON whitespace
+// spans several lines, which exercises the whole-stream read-to-EOF input path that
+// the old per-line reader (readOneLine) could not handle.  `uri` is substituted
+// verbatim, as in chatWithImage (needs no further JSON escaping for the file:// form).
+std::string chatWithImageMultiline(const std::string& uri) {
+  return std::string("{\n")
+       + "  \"messages\": [\n"
+       + "    {\n"
+       + "      \"role\": \"user\",\n"
+       + "      \"content\": [\n"
+       + "        { \"type\": \"text\", \"text\": \"describe this image\" },\n"
+       + "        { \"type\": \"image_url\", \"url\": \"" + uri + "\" }\n"
+       + "      ]\n"
+       + "    }\n"
+       + "  ]\n"
+       + "}\n";
+}
+
 // Launch the built ovgenai with `args`, capturing its stdout/stderr.  `stdIn`,
 // `home`, `cwd` are optional per-run overrides (empty = leave the inherited
 // value): a non-empty stdIn is piped to the child (and is what makes the
@@ -268,6 +287,18 @@ TEST(vlm_image, pipedStdinIsAccepted) {
   runImageVariant(std::string("file://") + OVGENAI_VLM_IMAGE,
                   chatWithImage(std::string("file://") + OVGENAI_VLM_IMAGE), "", "",
                   "piped stdin (no --input)");
+}
+
+// Regression guard for the read-to-EOF change (req (a)): the SAME image chat as
+// pipedStdinIsAccepted, but pretty-printed across many lines on piped stdin (no
+// --input).  The old per-line reader (readOneLine) stopped at the first '\n' so the
+// chat would fail to parse; readAllInput reads the whole document to EOF, so it passes.
+TEST(vlm_image, multiLinePipedStdinIsAccepted) {
+  std::string why;
+  if (!vlmReady(&why)) { GTEST_SKIP() << why; return; }
+  const std::string uri = std::string("file://") + OVGENAI_VLM_IMAGE;
+  runImageVariant(uri, chatWithImageMultiline(uri), "", "",
+                  "multi-line piped stdin (no --input)");
 }
 
 // The negative case: a url that no resolver branch can open must be a clean

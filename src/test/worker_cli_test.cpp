@@ -169,6 +169,23 @@ TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
 #endif
 }
 
+// --input and --worker are two exclusive input surfaces, so giving both is a
+// usage error the front-end must reject on stderr with exit 1, before any model
+// load -- hence this test needs no VLM fixture, only that the binary execs
+// (the ovgenaiRuns gate, shared with the other vcli_worker tests).  The conflict
+// is detected from the bound --worker bool and the optional --input, so the
+// --input value is irrelevant (any token) and no --model/--device is even
+// required to reach this early return.
+TEST(vcli_worker, inputAndWorkerConflictExitsOne) {
+  if (!ovgenaiRuns()) GTEST_SKIP() << "ovgenai not runnable here (needs `eval $(./setupenv.sh)`)";
+  std::string out, err;
+  int rc = runOvgenai({"vlm", "--input", "{\"messages\":[]}", "--worker"},
+                      &out, &err);
+  EXPECT_EQ(rc, 1) << "--input and --worker together must exit 1 (stderr):\n" << err;
+  EXPECT_NE(err.find("mutually exclusive"), std::string::npos)
+      << "expected the --input/--worker conflict text on stderr:\n" << err;
+}
+
 #else  // OVGENAI_WORKER_BIN not defined at configure time
 
 TEST(vcli_worker, binary_path_not_baked_in) { GTEST_SKIP() << "OVGENAI_WORKER_BIN not set at configure time"; }

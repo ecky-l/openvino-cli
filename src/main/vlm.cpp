@@ -169,6 +169,24 @@ std::string readOneLine(std::istream& in, std::size_t limit) {
   return s;
 }
 
+// The whole-stream reader the one-shot's piped / redirected (a non-tty) case needs: a
+// multi-line / pretty-printed chat is ONE document, so read it all the way to EOF (no
+// per-line "\n" stop like readOneLine).  Same char-by-char byte-cap shape as readOneLine
+// (a runaway pipe still throws), but the worker keeps one-op-per-line via readOneLine --
+// this stays the one-shot only.  The cap is the shared protocolLineLimit().
+std::string readAllInput(std::istream& in, std::size_t limit) {
+  std::string s;
+  int ch = in.get();
+  while (ch != EOF) {
+    if (limit && s.size() + 1 > limit)
+      throw config::ConfigError("vlm input exceeds the " + std::to_string(limit) +
+                                 "-byte limit");
+    s.push_back(static_cast<char>(ch));
+    ch = in.get();
+  }
+  return s;
+}
+
 std::size_t protocolLineLimit() {
 #ifdef OVGENAI_PROTOCOL_LINE_LIMIT
   return static_cast<std::size_t>(OVGENAI_PROTOCOL_LINE_LIMIT);
@@ -197,9 +215,9 @@ std::string readMailInput() {
 
 // Acquire the one-shot chat input -- the precedent (req 2 + 3):
 //   A. --input given  -> return its value verbatim; read NO stdin at all.
-//   B. --input absent AND stdin is NOT a tty (a pipe / redirect) -> one (possibly
-//      huge) line, the OpenArc gen_config one-line form (the same reader the
-//      --worker loop uses).
+//   B. --input absent AND stdin is NOT a tty (a pipe / redirect) -> read the whole
+//      stdin to EOF, then parse it: a multi-line / pretty-printed chat is ONE document.
+//      (The --worker keeps one line per op via readOneLine; it never reaches here.)
 //   C. --input absent AND stdin IS a tty (nothing piped) -> read the chat from the
 //      command line until a lone '.', the mail command's way.
 // A is decided first, so a present --input never touches stdin (req 2); the isatty
@@ -208,7 +226,7 @@ std::string readMailInput() {
 std::string acquireInput(const std::optional<std::string>& cliInput) {
   if (cliInput.has_value()) return *cliInput;                      // A: --input given
   if (isatty(STDIN_FILENO)) return readMailInput();                // C: a terminal
-  return readOneLine(std::cin, protocolLineLimit());               // B: piped -> one line
+  return readAllInput(std::cin, protocolLineLimit());               // B: piped -> read to EOF, then parse
 }
 
 // The base64 payload of a data: URL -- strip a "data:image/..;base64," prefix if
@@ -755,13 +773,17 @@ po::options_description vlmOptionsDesc(bool withWorker, bool& worker) {
         " is read from stdin: a pipe yields one (possibly large) line, an interactive"
         " terminal is read a line at a time until a lone '.', the mail command's way."
         " An image part may carry a url that is a file (\"file://..\" / ~ / absolute"
-        " / relative to the CWD) or the built-in data: / base64 form.");
+        " / relative to the CWD) or the built-in data: / base64 form. Mutually"
+        " exclusive with --worker: --input is a one-shot direct chat (no stdin), the"
+        " --worker form reads its protocol from stdin -- they are not both given.");
   if (withWorker)
     s.add_options()("worker", po::bool_switch(&worker),
                      "Run as a long-lived worker subprocess: stay up and read/write"
                      " the line-JSON protocol on stdin/stdout (GENERATE/PING/CANCEL/"
                      " UNLOAD -> READY/RESULT/PONG/CANCEL/DONE/ERROR). Omit for a"
-                     " one-shot run.");
+                     " one-shot run. Mutually exclusive with --input: a --worker reads"
+                     " its protocol from stdin, where --input is a one-shot chat that"
+                     " reads no stdin.");
   else
     worker = false;
   s.add_options()("help", po::bool_switch(), "Show this help message");
@@ -797,12 +819,23 @@ int runVlm(const std::string& prog, const std::vector<std::string>& args) {
   // model/device straight from pass 1 (for the label emitted before loading).
   std::string model = vm.count("model") ? vm["model"].as<std::string>() : std::string();
   std::string device = vm.count("device") ? vm["device"].as<std::string>() : std::string();
-  // --input (optional): the direct chat input; when absent a chat is read from
-  // stdin instead (see acquireInput).  --input is a no-op for the --worker form
-  // (which reads its line-JSON protocol from stdin), so it is only forwarded to
-  // the one-shot branch below.
+  // --input (optional): the direct chat for the one-shot form; when absent a
+  // chat is read from stdin instead (see acquireInput).
   std::optional<std::string> cliInput =
       vm.count("input") ? std::optional<std::string>(vm["input"].as<std::string>()) : std::nullopt;
+
+  // --input and --worker are two exclusive input surfaces: --input is a one-shot
+  // direct chat (read with no stdin), --worker is the long-lived form that reads
+  // its line-JSON protocol from stdin.  Giving both is a usage error, so reject
+  // it on stderr and exit 1 -- before loading a model, so the rejection needs no
+  // fixture and never starts a run.  (The explicit requirement is exit 1, unlike
+  // the exit 2 that the ConfigError boost/parse errors use further down.)
+  if (worker && cliInput.has_value()) {
+    std::fprintf(stderr, "ovgenai: vlm: --input and --worker are mutually exclusive "
+                        "(give the chat via --input for the one-shot form, or on "
+                        "stdin for the --worker form; not both)\n");
+    return 1;
+  }
 
   // Emit the mode+model label up front (mirrors the other pipelines' stub), so
   // the mode is visible on stderr even if a later step (e.g. load) then fails.
