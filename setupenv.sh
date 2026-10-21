@@ -14,3 +14,4 @@
 echo "export OpenVINO_DIR=\"${OPENVINO_DIR}/runtime/cmake\""
 echo "export OpenVINOGenAI_DIR=\"${OPENVINO_GENAI_DIR}/runtime/cmake\""
 echo "export LD_LIBRARY_PATH=\"${OPENVINO_GENAI_DIR}/runtime/lib/intel64:${OPENVINO_DIR}/runtime/3rdparty/tbb/lib:${OPENVINO_DIR}/runtime/lib/intel64:\$LD_LIBRARY_PATH\""
+echo "export PYTHONPATH=${OPENVINO_GENAI_DIR}/python:${OPENVINO_DIR}/python:${OPENVINO_DIR}/python/python3:"
