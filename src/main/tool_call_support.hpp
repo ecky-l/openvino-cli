@@ -136,6 +136,45 @@ public:
       m_consumed = close + kTCClose.size();
     }
 
+    // FINALIZE A TRUNCATED BLOCK -- the case this round fixes. A small model under-rands one
+    // token short of the OUTER ‹/tool_call› (its |im_end| lands first): it has OPENED
+    // ‹tool_call› and fully typed the INNER ‹function=NAME› ... ‹/function› but never the outer
+    // close. The IncrementalParser has no end()/finalize hook (the engine consumes |im_end| as a
+    // stop token and hands us no more parse() calls), so we detect "the call is done" HERE: an
+    // open block whose inner function is complete, with no 2nd function in flight. Deferring on
+    // a later function avoids truncating a multi-call turn -- still the documented "stop at the
+    // first completed call". The "call completed" block below then forwards tool_calls + flips
+    // TOOL_CALL_STOP; consuming to end-of-buffer swallows the dangling outer-open start so it is
+    // not re-exposed in the result as stray angle tags.
+    if (m_calls.size() == calls_before) {
+      const std::size_t pendingOpen = m_text.find(kTCOpen, m_consumed);
+      if (pendingOpen != std::string::npos) {
+        const std::size_t funcOpen = m_text.find(kFuncOpen, pendingOpen + kTCOpen.size());
+        if (funcOpen != std::string::npos) {
+          const std::size_t fe = m_text.find(GT, funcOpen + kFuncOpen.size());
+          if (fe != std::string::npos) {
+            // require the inner function to be actually CLOSED, not merely opened
+            const std::size_t fc = m_text.find(kFuncClose, fe + 1);
+            if (fc != std::string::npos) {
+              const std::size_t innerCloseEnd = fc + kFuncClose.size();
+              // defer if a FURTHER function follows this one (a multi-call turn): never truncate it
+              const std::size_t nextFunc = m_text.find(kFuncOpen, innerCloseEnd);
+              if (nextFunc == std::string::npos) {
+                const std::string body = m_text.substr(
+                    pendingOpen + kTCOpen.size(),
+                    innerCloseEnd - (pendingOpen + kTCOpen.size()));
+                const auto call = qwenBlockToCall(body);
+                if (!call.is_null()) {
+                  m_calls.push_back(call);
+                  m_consumed = m_text.size();
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Emit only the finalized, non-tool text: up to the next not-yet-closed ‹tool_call ›
     // (otherwise the in-progress block is held until its close arrives and is parsed out).
     std::size_t emit_to;
@@ -233,16 +272,36 @@ inline std::shared_ptr<ov::genai::IncrementalParser> makeToolCallParserByName(co
 // present -- then match the rendered text against the registry sentinels.  Returns the
 // name of the matching wired format, or nullopt if none match (graceful).
 inline std::optional<std::string> detectToolCallFormat(const ov::genai::Tokenizer& tok) {
-  const std::string toolsJson =
-    "[{\"type\":\"function\",\"function\":{\"name\":\"_probe\",\"description\":\"probe\","
-    "\"parameters\":{\"type\":\"object\",\"properties\":{\"x\":{\"type\":\"string\"}}}}}";
+  // Probe tool arg: one dummy function tool, BUILT via the engine's own JsonContainer
+  // API rather than hand-typed JSON, so the outer array and every nested object are
+  // balanced by construction (a hand-typed literal here had dropped the trailing object
+  // close + array close, making from_json_string throw -> the catch returned nullopt and
+  // auto-detect silently never fired). The literal tokens below ("_probe"/"x"/"probe")
+  // deliberately do NOT collide with the model-intrinsic example_function_name /
+  // example_parameter sentinels the parser keys on -- those come from the template.
+  ov::genai::JsonContainer xProp = ov::genai::JsonContainer::object();
+  xProp["type"] = std::string("string");
+  xProp["description"] = std::string("probe");
+  ov::genai::JsonContainer props = ov::genai::JsonContainer::object();
+  props["x"] = xProp;
+  ov::genai::JsonContainer params = ov::genai::JsonContainer::object();
+  params["type"] = std::string("object");
+  params["properties"] = props;
+  ov::genai::JsonContainer fn = ov::genai::JsonContainer::object();
+  fn["name"] = std::string("_probe");
+  fn["description"] = std::string("probe");
+  fn["parameters"] = params;
+  ov::genai::JsonContainer tool = ov::genai::JsonContainer::object();
+  tool["type"] = std::string("function");
+  tool["function"] = fn;
+  ov::genai::JsonContainer tools = ov::genai::JsonContainer::array();
+  tools.push_back(tool);
   ov::genai::ChatHistory history(ov::genai::JsonContainer::from_json_string(
       "[{\"role\":\"user\",\"content\":\"hi\"}]"));
   std::string rendered;
   try {
     rendered = tok.apply_chat_template(history, true, std::string(),
-                                       std::optional<ov::genai::JsonContainer>(
-                                         ov::genai::JsonContainer::from_json_string(toolsJson)),
+                                       std::optional<ov::genai::JsonContainer>(tools),
                                        std::nullopt);
   } catch (...) {
     return std::nullopt;

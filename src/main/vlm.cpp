@@ -33,6 +33,7 @@
 #include "model_runtime_config.hpp"   // parseModelRuntimeConfig + ModelRuntimeConfig
 #include "model_request_config.hpp"   // parseModelRequestConfig / modelRequestConfigFromJson / modelRequestConfigToJson
 #include "model_scheduler_config.hpp" // parseModelSchedulerConfig + ModelSchedulerConfig
+#include "tool_call_support.hpp"      // (b) the CLI-side tool-call parser + registry (ContentStreamer / select* / detect*)
 #include "genai_config.hpp"           // makeGenerationConfig + GenAIPipelineConfig + re-exported config types
 
 #include <boost/program_options.hpp>
@@ -470,6 +471,25 @@ std::shared_ptr<ov::genai::StreamerBase> makeAccumulatingStreamer(
   return std::make_shared<ov::genai::TextStreamer>(tok, cb, detok);
 }
 
+// (b) The parser-aware streamer for the (tools | kwargs) pre-apply path.  When a
+// tool-call parser is selected (an explicit --tool-call-parser, else auto-detected
+// from the model's OWN rendered template -- see selectToolCallParserName) we carry it
+// in a ContentStreamer, a TextParserStreamer subclass: the engine both runs the parser
+// loop AND copies its get_parsed_message() (which, on a completed call, holds .tool_calls)
+// into res.parsed[0] -- it copies parsed[0] regardless of cfg.parsers, because it first
+// dynamic-casts the streamer to TextParserStreamer -- so we run the parser IN the streamer
+// and leave cfg.parsers empty.  With no selection it keeps today's plain accumulating
+// TextStreamer: no .tool_calls, no TOOL_CALL_STOP, finish_reason stays stop.
+std::shared_ptr<ov::genai::StreamerBase> makeContentStreamer(
+    const ov::genai::Tokenizer& tok,
+    const std::optional<std::shared_ptr<ov::genai::IncrementalParser>>& parser,
+    std::string& acc) {
+  if (!parser.has_value() || !*parser)
+    return makeAccumulatingStreamer(tok, acc);
+  std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers{std::move(*parser)};
+  return std::make_shared<::ovgenai::toolcall::ContentStreamer>(tok, std::move(parsers), acc);
+}
+
 // (c) native finish_reason -> the wire field (null for NONE).
 std::string finishReasonName(ov::genai::GenerationFinishReason r) {
   switch (r) {
@@ -499,10 +519,32 @@ void emitResult(bool isWorker, std::int64_t reqId,
                 const std::string& text,
                 const ov::genai::VLMDecodedResults& res,
                 const ovgenai::config::ModelRequestConfig& reqConfig) {
-  // (b) prefer the specials-preserving accumulation; fall back to the engine's
-  // own (specials-stripped) text only if the streamer produced nothing.
+  // (b) The structured tool-call read from the streamer (a TextParserStreamer subclass) lands in
+  // res.parsed[0]["tool_calls"], which the engine copies from get_parsed_message() (the parser
+  // flips TOOL_CALL_STOP when a call is complete).  We key EVERYTHING off that, NOT off the
+  // engine's own finish reason: a small model can under-rand before its OUTER ‹/tool_call› tag,
+  // leaving the engine's stored finish as "stop" even though the PARSER (our authority) already
+  // recorded a call.  So a non-empty tool_calls => we report finish_reason "tool_calls".
+  // When a tool call is present we keep the specials-preserving `out` (NOT the engine's
+  // specials-stripped res.texts[0], which would re-expose the raw ‹tool_call› tags); the
+  // res.texts[0] fallback stays for the no-parser / no-call path.
+  const bool hasToolCalls =
+      !res.parsed.empty() && res.parsed[0].is_object() &&
+      res.parsed[0].contains("tool_calls") &&
+      res.parsed[0]["tool_calls"].is_array() &&
+      res.parsed[0]["tool_calls"].size() > 0;
   std::string out = text;
-  if (out.empty() && !res.texts.empty()) out = res.texts[0];
+  if (!hasToolCalls && out.empty() && !res.texts.empty()) out = res.texts[0];
+  // A pure tool-call turn has no prose to show: if the only content in `out` is the model's own
+  // leading whitespace before the block, blank it (so a pure call reports result:"" rather than a
+  // bare newline).  A real prose-then-call turn carries non-whitespace text and is left intact.
+  if (hasToolCalls) {
+    bool blank = true;
+    for (const char c : out)
+      if (!std::isspace(static_cast<unsigned char>(c))) { blank = false; break; }
+    if (blank)
+      out.clear();
+  }
 
   std::vector<ov::genai::GenerationFinishReason> fr = res.finish_reasons;
   ov::genai::GenerationFinishReason finish =
@@ -522,7 +564,15 @@ void emitResult(bool isWorker, std::int64_t reqId,
   }
   put("\"result\":\"" + jsonEscape(out) + "\"");
 
-  std::string frName = finishReasonName(finish);
+  // (b) the structured tool calls, if any -- one compact array so the worker's single-line
+  // JSONL stays one physical line (to_json_string(-1) is the compact dumper).
+  if (hasToolCalls)
+    put(std::string("\"tool_calls\":") + res.parsed[0]["tool_calls"].to_json_string(-1));
+
+  // The PARSER is the authority for a tool-call turn: a non-empty tool_calls wins over the
+  // engine's finish, which may read "stop" when the model under-rands its ‹/tool_call› outer tag
+  // (we finalize on the inner ‹/function›, so the turn is still reported as a tool call, not a stop).
+  std::string frName = hasToolCalls ? std::string("tool_calls") : finishReasonName(finish);
   if (frName.empty())
     put(std::string("\"finish_reason\":null"));
   else
@@ -632,8 +682,31 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
         : std::nullopt;
     std::string rendered = tokenizer.apply_chat_template(
         history, pr.addGenerationPrompt, std::string(), tools, extra);
+    // (b) Resolve the tool-call parser for THIS request: an explicit --tool-call-parser
+    // wins; else auto-detect from the model's OWN rendered template (the model-intrinsic
+    // sentinel); else none.  A selected-but-unwired name resolves to no parser and degrades
+    // to plain text; an auto-detected (or explicitly selected + wired) format is reported on
+    // stderr (never the wire stdout, so the protocol stays one-JSON-per-line).
+    std::optional<std::string> detectedName;
+    const auto parserName = ::ovgenai::toolcall::selectToolCallParserName(
+        reqConfig.tool_call_parser, tokenizer, &detectedName);
+    std::optional<std::shared_ptr<ov::genai::IncrementalParser>> parser;
+    if (parserName.has_value() && !parserName->empty()) {
+      auto p = ::ovgenai::toolcall::makeToolCallParserByName(*parserName);
+      if (p) {
+        parser = std::move(p);
+        std::fprintf(stderr, "ovgenai: vlm: using tool-call parser '%s'\n", parserName->c_str());
+      } else {
+        std::fprintf(stderr, "ovgenai: vlm: --tool-call-parser '%s' is advertised but not yet "
+                             "wired in the CLI; falling back to plain text (no tool_calls)\n",
+                     parserName->c_str());
+      }
+    } else if (detectedName.has_value()) {
+      std::fprintf(stderr, "ovgenai: vlm: auto-detected tool-call format '%s' from the model's "
+                           "chat template\n", detectedName->c_str());
+    }
     std::string acc;
-    auto streamer = makeAccumulatingStreamer(tokenizer, acc);
+    auto streamer = makeContentStreamer(tokenizer, parser, acc);
     auto res = pipe.generate(rendered, pr.images, cfg, ov::genai::StreamerVariant(streamer));
     emitResult(isWorker, reqId, acc, res, reqConfig);
     return 0;

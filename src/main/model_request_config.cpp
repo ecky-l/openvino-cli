@@ -13,6 +13,7 @@
 #include "model_load_config.hpp"       // the load section, spliced into our parse
 #include "model_runtime_config.hpp"    // the runtime section, spliced into our parse
 #include "model_scheduler_config.hpp"  // the scheduler section, spliced into our parse
+#include "tool_call_support.hpp"        // advertisedToolCallParsers() -- one source of truth for accepted --tool-call-parser names
 
 #include <algorithm>
 #include <sstream>
@@ -29,9 +30,11 @@ namespace ovgenai {
 namespace config {
 namespace {
 
-// --- The tool-call output format enum (the accepted member strings) ---
-const std::vector<std::string> kToolParsers = {
-    "qwen35", "hermes", "gemma4", "museglimmer"};
+// The accepted --tool-call-parser names are NOT a local list: they come from the tool-call
+// registry (ovgenai::toolcall::advertisedToolCallParsers() -- one source of truth for both this
+// CLI-flag validation and the parser actually used at run time in vlm.cpp).  An advertised-but-
+// unwired name is still accepted here and simply resolves to no parser at run time, degrading
+// gracefully to plain text.
 
 // Parse a double from the CLI; a malformed / trailing-garbage value is a ConfigError.
 double parseDouble(const std::string& s, const char* flag) {
@@ -140,6 +143,8 @@ po::options_description ModelRequestConfig::requestOptionsDesc() {
     ("temperature", po::value<std::string>(),
         "Sampling temperature as a float > 0 -- higher = more random/uniform, lower = more "
         "deterministic; 0 or negative = greedy (deterministic) decoding. Default 1.0.")
+    // Help mirrors the registry (advertisedToolCallParsers()); boost's desc arg is a const
+    // char*, so the *validated* set comes from the registry and this is a literal kept in sync.
     ("tool-call-parser", po::value<std::string>(),
         "Tool-call (function-calling) output format/parser for the generation output: "
         "qwen35 / hermes / gemma4 / museglimmer (no short: --tool-* prefix-conflicts the other 't' flags).")
@@ -246,10 +251,12 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
   if (vm.count("top-p"))
     cfg.top_p = parseDouble(vm["top-p"].as<std::string>(), "--top-p");
 
+  const std::vector<std::string> allowedParsers =
+      ::ovgenai::toolcall::advertisedToolCallParsers();
   if (cfg.tool_call_parser.has_value() && !cfg.tool_call_parser->empty() &&
-      !inSet(*cfg.tool_call_parser, kToolParsers))
+      !inSet(*cfg.tool_call_parser, allowedParsers))
     throw ConfigError("--tool-call-parser '" + *cfg.tool_call_parser +
-                      "' must be one of: " + joinList(kToolParsers, ", "));
+                      "' must be one of: " + joinList(allowedParsers, ", "));
   return cfg;
 }
 

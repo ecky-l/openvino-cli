@@ -86,6 +86,36 @@ TEST(ToolCallSupport, NonToolTextPassesThrough) {
   EXPECT_EQ(msg.size(), std::size_t{0});          // nothing was written into the delta_message
 }
 
+// THE reported bug, proven WITHOUT a model: the model opens ‹tool_call› and fully types its
+// inner ‹function=get_weather› ... ‹/function›, but generation turns the corner (|im_end|) one
+// token short of the OUTER ‹/tool_call›.  The inner function is COMPLETE, so this must still be
+// detected as a tool call (finish_reason "tool_calls"), not silently dropped as a plain "stop".
+// It mirrors the live 0.8B under-run; the parser fix (finalize on the inner close when no 2nd
+// function is in flight) is what makes this pass.
+TEST(ToolCallSupport, ToolCallTruncatedOuterCloseStillFires) {
+  QwenXmlToolCallIncrementalParser p;
+  ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
+  const std::string full = blockForCall("get_weather", {{"city", "London"}});
+
+  ASSERT_FALSE(full.empty());
+  ASSERT_EQ(full[full.size() - 1], GT[0]);          // full ends on the outer ‹/tool_call›
+
+  // Drop ONLY the final byte of the outer close, so the inner ‹/function› is complete but the
+  // outer ‹/tool_call› is not: with the parser fix this is still a finished call (status
+  // TOOL_CALL_STOP + one structured call), exactly what the under-running 0.8B now yields.
+  // `in` is NON-const on purpose: IncrementalParser::parse takes its text as a `std::string&`
+  // (the base contract "modified in place"), so a `const` local would not bind.
+  std::string in = full.substr(0, full.size() - 1);
+
+  p.parse(msg, in, std::nullopt);
+  EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::TOOL_CALL_STOP));
+  const auto& calls = msg["tool_calls"];
+  ASSERT_TRUE(calls.is_array());
+  ASSERT_EQ(calls.size(), std::size_t{1});
+  EXPECT_EQ(calls[0]["name"].get_string(), "get_weather");
+  EXPECT_EQ(calls[0]["arguments"]["city"].get_string(), "London");
+}
+
 // The close tag straddles a chunk boundary: completion must still be detected on the later
 // chunk (the parser accumulates all decoded text and re-scans from its consume-cursor).
 TEST(ToolCallSupport, ToolCallSplitAcrossChunks) {
@@ -95,8 +125,18 @@ TEST(ToolCallSupport, ToolCallSplitAcrossChunks) {
 
   ASSERT_FALSE(full.empty());
   ASSERT_EQ(full[full.size() - 1], GT[0]);        // last byte is the › that ends ‹/tool_call ›
-  std::string a = full.substr(0, full.size() - 1);   // drop the › -> close is incomplete
-  std::string b = full.substr(full.size() - 1);     // the missing › byte
+  // With the parser fix (finalize on the inner ‹/function›, not the outer ‹/tool_call›) the
+  // completion point moved inward.  Split JUST AFTER the inner function-name's terminating byte,
+  // so chunk `a` has the inner function OPENED but not yet closed -> a genuinely partial block
+  // that must stay RUNNING (no premature trigger); chunk `b` brings the close and the call is
+  // reported only then, keeping the test's intent (no trigger until the block is complete).
+  const std::size_t kfo = full.find(kFuncOpen);
+  ASSERT_NE(kfo, std::string::npos);
+  const std::size_t fe = full.find(GT, kfo + kFuncOpen.size());
+  ASSERT_NE(fe, std::string::npos);
+  std::string a = full.substr(0, fe + 1);            // ...through the inner function-name's byte
+  ASSERT_FALSE(a.empty());
+  std::string b = full.substr(fe + 1);               // params...‹/function›...‹/tool_call›
 
   const std::string fa = p.parse(msg, a, std::nullopt);
   EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::RUNNING));
