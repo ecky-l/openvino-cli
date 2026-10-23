@@ -9,10 +9,17 @@ namespace ovgenai {
 namespace toolcall {
 
 // --- ContentStreamer (carries the parser; the engine runs the loop + copies the result) --
+// The base's ctor hardcodes EMPTY detokenization params, so its decode() would fall back to the
+// tokenizer's rt_info default (skip_special_tokens = true for these fixtures) and STRIP a leading
+// ‹/thinking› -- for the 0.8B that close-of-thinking IS the whole lead-in before the ‹tool_call›, so
+// the surfaced content would collapse to empty. Setting skip_special_tokens = false here (the same
+// idiom makeAccumulatingStreamer uses at vlm.cpp:470) preserves that lead-in verbatim as-is.
 ContentStreamer::ContentStreamer(const ov::genai::Tokenizer& tok,
                                  std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers,
                                  std::string& acc)
-  : ov::genai::TextParserStreamer(tok, std::move(parsers)), m_acc(acc) {}
+  : ov::genai::TextParserStreamer(tok, std::move(parsers)), m_acc(acc) {
+  m_additional_detokenization_params = ov::AnyMap{ ov::genai::skip_special_tokens(false) };
+}
 
 ov::genai::StreamingStatus ContentStreamer::write(ov::genai::JsonContainer& message) {
   m_acc += message["content"].as_string().value_or(std::string());   // -> result
