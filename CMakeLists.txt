@@ -66,7 +66,11 @@ configure_file(
 
 # --- Engine core (static lib): everything but main.cpp ----------------------
 file(GLOB OVGENAI_CORE_SOURCES CONFIGURE_DEPENDS
-  "${CMAKE_CURRENT_SOURCE_DIR}/src/main/*.cpp")
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/main/*.cpp"
+  # the per-model tool-call parsers live in their own subdir toolcallparsers/ (this phase:
+  # qwen35_tool_call_parser.cpp; a later phase adds a sibling file per model there).  One
+  # extra glob so the core lib compiles them; the parent glob keeps every other src/main/*.
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/main/toolcallparsers/*.cpp")
 list(REMOVE_ITEM OVGENAI_CORE_SOURCES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/main/main.cpp")
 
@@ -88,7 +92,20 @@ set_target_properties(ovgenai PROPERTIES OUTPUT_NAME ovgenai)
 # --- Tests ----------------------------------------------------------------
 if(OVGENAI_BUILD_TESTS)
   enable_testing()
-  find_package(GTest REQUIRED)           # installed config exports GTest::GTest / GTest::Main
+  find_package(GTest REQUIRED)           # installed config exports the lowercase GTest::gtest / GTest::gtest_main / GTest::gmock / GTest::gmock_main
+  # The dnf gtest-devel / gmock-devel config ships the LOWERCASE targets (GTestTargets.cmake),
+  # but this file links the capital aliases -- so bridge them onto whatever the box actually
+  # ships (the same "config wins, alias for compat" move the RapidJSON block makes) and
+  # GUARANTEE a GTest::gmock target for the new gmock-based qwen35 tool-call test below.
+  if(TARGET GTest::gtest AND NOT TARGET GTest::GTest)
+    add_library(GTest::GTest ALIAS GTest::gtest)
+  endif()
+  if(TARGET GTest::gtest_main AND NOT TARGET GTest::Main)
+    add_library(GTest::Main ALIAS GTest::gtest_main)
+  endif()
+  if(NOT TARGET GTest::gmock AND TARGET GTest::GMock)
+    add_library(GTest::gmock ALIAS GTest::GMock)
+  endif()
 
   file(GLOB OVGENAI_TEST_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test/*.cpp")
@@ -99,7 +116,7 @@ if(OVGENAI_BUILD_TESTS)
     ${OVGENAI_TEST_SOURCES}
     "${CMAKE_CURRENT_SOURCE_DIR}/src/test/gtest_main.cpp")
   target_link_libraries(ovgenai_tests PRIVATE
-    ovgenai_core GTest::GTest GTest::Main)
+    ovgenai_core GTest::GTest GTest::Main GTest::gmock)
   set_target_properties(ovgenai_tests PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}")
   target_compile_definitions(ovgenai_tests PRIVATE
@@ -121,6 +138,21 @@ if(OVGENAI_BUILD_TESTS)
   if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/src/test/fixtures/dog-237-536x354.jpg")
     target_compile_definitions(ovgenai_tests PRIVATE
       OVGENAI_VLM_IMAGE="${CMAKE_CURRENT_SOURCE_DIR}/src/test/fixtures/dog-237-536x354.jpg")
+  endif()
+
+  # The captured real Qwen3.5 / 3.6 / 3.8 tool-call OUTPUTS: one section per model, each a
+  # " * " bullet line followed by the result / finish_reason / metrics / gen_config JSON
+  # object the live run printed (all four used --tool-call-parser gemma4, the unwired name,
+  # so every captured result leaks its raw tags and finishes "stop").  The new
+  # qwen35_tool_call_parser_test reads this file and feeds each section `result` -- which
+  # carries inter-tag newlines plus a leading close-of-thinking / prose section, exactly as
+  # the live model emitted it -- line by line to the parser, then checks the uniform
+  # tool_calls + finish_reason output.  Baked absolute (like the other fixtures) so the test
+  # reads it regardless of CWD; when the file is absent at configure time the macro is simply
+  # not defined and the suite skips.
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tool-call-qwen35.txt")
+    target_compile_definitions(ovgenai_tests PRIVATE
+      OVGENAI_TC_QWEN35_FILE="${CMAKE_CURRENT_SOURCE_DIR}/tool-call-qwen35.txt")
   endif()
 
   include(GoogleTest)

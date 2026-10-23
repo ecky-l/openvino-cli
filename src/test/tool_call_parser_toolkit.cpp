@@ -57,7 +57,7 @@ int statusOf(ov::genai::StreamingStatus s) { return static_cast<int>(s); }
 // stops generation and the CLI reports finish_reason = tool_calls), and records
 // {name, arguments} on the shared delta_message for the engine to copy into .parsed.
 TEST(ToolCallSupport, QwenBlockSingleCall) {
-  QwenXmlToolCallIncrementalParser p;
+  Qwen35ToolCallParser p;
   ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
   std::string in = blockForCall("get_weather", {{"city", "London"}, {"unit", "celsius"}});
 
@@ -75,7 +75,7 @@ TEST(ToolCallSupport, QwenBlockSingleCall) {
 
 // Plain (non-tag) text passes through untouched and never sets a tool_calls key.
 TEST(ToolCallSupport, NonToolTextPassesThrough) {
-  QwenXmlToolCallIncrementalParser p;
+  Qwen35ToolCallParser p;
   ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
   std::string in = "Sure, I will look that up.";
 
@@ -93,7 +93,7 @@ TEST(ToolCallSupport, NonToolTextPassesThrough) {
 // It mirrors the live 0.8B under-run; the parser fix (finalize on the inner close when no 2nd
 // function is in flight) is what makes this pass.
 TEST(ToolCallSupport, ToolCallTruncatedOuterCloseStillFires) {
-  QwenXmlToolCallIncrementalParser p;
+  Qwen35ToolCallParser p;
   ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
   const std::string full = blockForCall("get_weather", {{"city", "London"}});
 
@@ -119,7 +119,7 @@ TEST(ToolCallSupport, ToolCallTruncatedOuterCloseStillFires) {
 // The close tag straddles a chunk boundary: completion must still be detected on the later
 // chunk (the parser accumulates all decoded text and re-scans from its consume-cursor).
 TEST(ToolCallSupport, ToolCallSplitAcrossChunks) {
-  QwenXmlToolCallIncrementalParser p;
+  Qwen35ToolCallParser p;
   ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
   const std::string full = blockForCall("get_weather", {{"city", "London"}});
 
@@ -156,7 +156,7 @@ TEST(ToolCallSupport, ToolCallSplitAcrossChunks) {
 // later pass that completes the block adds no content -- so the recorded content and the
 // tool_calls carry disjoint information (the block itself is stripped out of the result).
 TEST(ToolCallSupport, ProsePrefixIsEmittedBeforeTheBlock) {
-  QwenXmlToolCallIncrementalParser p;
+  Qwen35ToolCallParser p;
   ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
   std::string prefix = "The weather in London is: ";
 
@@ -180,7 +180,7 @@ TEST(ToolCallSupport, ProsePrefixIsEmittedBeforeTheBlock) {
 // a fresh turn completes cleanly: a second block after reset yields exactly ONE new call
 // (not a stale carry-over from turn 1) and a RUNNING status.
 TEST(ToolCallSupport, ResetClearsPerTurnState) {
-  QwenXmlToolCallIncrementalParser p;
+  Qwen35ToolCallParser p;
   ov::genai::JsonContainer msg1 = ov::genai::JsonContainer::object();
   std::string d1 = blockForCall("get_weather", {{"city", "Paris"}});
   p.parse(msg1, d1, std::nullopt);
