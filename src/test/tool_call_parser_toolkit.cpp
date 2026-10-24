@@ -1,32 +1,25 @@
-// Tool-call parser / registry unit tests for (b) -- model-agnostic, future-proof tool
-// CALL support in the `vlm` subcommand.  NOTHING here loads a model: the tests drive the
-// CLI-side machinery directly -- the Qwen3.5 IncrementalParser (the nested  ‹tool_call› …
-// ‹/tool_call›  tag block the model's own template emits, validated by rendering the model's
-// loaded template through the public tokenizer API), the ContentStreamer wrapper, the
-// name->parser registry (one source of truth), and the MODEL-FREE detection sentinel match.
-// The model-GATED half of the gate (render the model's template then detect) is covered
-// separately once a fixture with a tool-aware template lands in the tree.
+// Model-free unit tests for the Qwen3.5 tool-call parser (the QwenXMLToolParser C++ port).
 //
-// Tag literals are built from the header's escaped constants (LT / GT / kFuncOpen / ...),
-// so no literal provider bracket pair appears in this source (it would otherwise re-run a
-// tooling scanner); where a tag is shown in prose it is written with the inert ‹…› marker.
+// They drive the parser the way the engine does -- a fresh delta_message per chunk, the parser's
+// returned content folded into an accumulated message via concatenate -- but supply REAL token
+// ids by SPLITTING the text with Qwen35BoundarySynthesizer (no real tokenizer / model needed:
+// the synthesizer emits each complete boundary tag in its own chunk carrying its token id).  The
+// parser then INVESTIGATES delta_tokens for the boundary ids (248058/248059), runs its state
+// machine, collects the call fragments + content, and EMITS the tool_calls array -- so a non-model
+// box still proves "the tool_calls array is present and correct."  Live model + real-token
+// coverage lives in qwen35_tool_call_parser_test.cpp.
 //
-// NAMING: the members are pulled in with a using-DIRECTIVE (not a namespace ALIAS):
-// `ovgenai` is re-opened FLAT by the project's other headers (commands/config/...), so a
-// `using tc = ovgenai::toolcall;` alias is rejected by this g++ ("denotes no type"), whereas a
-// `using namespace ovgenai::toolcall;` bringing the names in for THIS translation unit works
-// (verified).  It is contained to this file (does not pollute the project's global namespace).
+// Naming note: a using-DIRECTIVE (not an alias) is required because `ovgenai` is re-opened flat by
+// other headers; containing it here to this TU is harmless.
 //
-// The parser's 2nd arg is a non-const `std::string&` (the base class contract: "modified in
-// place"), so every delta_text passed to parse() must be a NON-CONST lvalue.
+// The calls are the OpenAI non-streaming shape {id, type:function, function:{name, arguments}}
+// with arguments a JSON string (the faithful QwenXMLToolParser output); helpers below read the
+// name under "function" and the city by re-parsing that arguments string.
 #include <gtest/gtest.h>
 
-#include "tool_call_support.hpp"
-
+#include "tool_call_support.hpp"                // ContentStreamer + the qwen35 header (parser + synth + consts)
 #include <openvino/genai/json_container.hpp>
-#include <openvino/genai/streamer_base.hpp>
-#include <openvino/genai/tokenizer.hpp>
-
+#include <openvino/genai/llm_pipeline.hpp>        // DecodedResults (the engine-side result the bridge fills)
 #include <cstddef>
 #include <memory>
 #include <optional>
@@ -37,9 +30,10 @@
 using namespace ovgenai::toolcall;
 
 namespace {
-// Build a complete Qwen3.5 call block for `fn` with the given {{param, value}} args, in the
-// exact shape the model's own template renders -- the outer  ‹tool_call› … ‹/tool_call›
-// wrapping an inner  ‹function=fn› … ‹/function›, each arg a  ‹parameter=p›v‹/parameter›.
+
+// Build a complete Qwen3.5 call block for `fn` with the given {param, value} args, in the exact
+// shape the model's own template renders (an outer call-open ... call-close frame; an inner
+// function-open=NAME ... function-close; per arg a parameter-open=P ... parameter-close).
 std::string blockForCall(const std::string& fn,
                          const std::vector<std::pair<std::string, std::string>>& args) {
   std::string b = kTCOpen + kFuncOpen + fn + GT;
@@ -49,158 +43,164 @@ std::string blockForCall(const std::string& fn,
   return b;
 }
 
-// Compare a StreamingStatus without relying on a gtest printer for the enum class.
+// Drive the parser over the synthesized (chunk, ids) events of `text`, mirroring the engine
+// (fresh delta_message per chunk; the parser's returned content folded via concatenate; a
+// streamer's get_parsed_message would be the accumulated message).  Returns the accumulated message.
+ov::genai::JsonContainer runSynth(Qwen35ToolCallParser& p, Qwen35BoundarySynthesizer& s,
+                                  const std::string& text) {
+  ov::genai::JsonContainer acc = ov::genai::JsonContainer::object();
+  auto feed = [&](std::vector<TokChunk> chunks) {
+    for (const auto& ch : chunks) {
+      ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
+      std::string t = ch.first;
+      const std::string content = p.parse(dm, t, ch.second);
+      dm["content"] = content;
+      acc.concatenate(dm);
+    }
+  };
+  feed(s.feed(text));
+  if (auto tail = s.flush()) feed(*tail);   // release a held (never-completing) tail
+  return acc;
+}
+
+// Read name / city out of the OpenAI-shaped call (arguments is a JSON string we re-parse).
+std::string callName(const ov::genai::JsonContainer& c) {
+  return c["function"]["name"].as_string().value_or(std::string());
+}
+std::optional<std::string> argCity(const ov::genai::JsonContainer& c) {
+  const std::string raw = c["function"]["arguments"].as_string().value_or(std::string());
+  if (raw.empty()) return std::nullopt;
+  try {
+    const ov::genai::JsonContainer a = ov::genai::JsonContainer::from_json_string(raw);
+    return a["city"].as_string();
+  } catch (...) { return std::nullopt; }
+}
 int statusOf(ov::genai::StreamingStatus s) { return static_cast<int>(s); }
+
 }  // namespace
 
-// A single complete call -> the parser finalises it, flips TOOL_CALL_STOP (so the engine
-// stops generation and the CLI reports finish_reason = tool_calls), and records
-// {name, arguments} on the shared delta_message for the engine to copy into .parsed.
+// A single complete call -> the parser investigates the boundary ids, runs the machine, collects
+// the fragments + content, and surfaces exactly ONE call in the tool_calls array (name + city).
 TEST(ToolCallSupport, QwenBlockSingleCall) {
   Qwen35ToolCallParser p;
-  ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
+  Qwen35BoundarySynthesizer s;
   std::string in = blockForCall("get_weather", {{"city", "London"}, {"unit", "celsius"}});
 
-  const std::string filtered = p.parse(msg, in, std::nullopt);
+  const ov::genai::JsonContainer acc = runSynth(p, s, in);
 
+  ASSERT_TRUE(acc.contains("tool_calls")) << "no tool_calls array was produced";     // the ask
+  ASSERT_TRUE(acc["tool_calls"].is_array()) << "tool_calls is not an array";
+  ASSERT_EQ(acc["tool_calls"].size(), std::size_t{1});
+  EXPECT_EQ(callName(acc["tool_calls"][0]), std::string("get_weather"));
+  ASSERT_TRUE(argCity(acc["tool_calls"][0]).has_value());
+  EXPECT_EQ(*argCity(acc["tool_calls"][0]), std::string("London"));
   EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::TOOL_CALL_STOP));
-  EXPECT_EQ(filtered, "");                        // the whole delta was the tool block
-  const auto& calls = msg["tool_calls"];
-  ASSERT_TRUE(calls.is_array());
-  ASSERT_EQ(calls.size(), std::size_t{1});
-  EXPECT_EQ(calls[0]["name"].get_string(), "get_weather");
-  EXPECT_EQ(calls[0]["arguments"]["city"].get_string(), "London");
-  EXPECT_EQ(calls[0]["arguments"]["unit"].get_string(), "celsius");
 }
 
-// Plain (non-tag) text passes through untouched and never sets a tool_calls key.
+// Plain (non-tag) text passes through untouched as content and never sets a tool_calls key.
 TEST(ToolCallSupport, NonToolTextPassesThrough) {
   Qwen35ToolCallParser p;
-  ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
+  Qwen35BoundarySynthesizer s;
   std::string in = "Sure, I will look that up.";
 
-  const std::string filtered = p.parse(msg, in, std::nullopt);
+  const ov::genai::JsonContainer acc = runSynth(p, s, in);
 
+  EXPECT_FALSE(acc.contains("tool_calls"));                                // no array
+  EXPECT_EQ(acc["content"].as_string().value_or(std::string()), in);
   EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::RUNNING));
-  EXPECT_EQ(filtered, "Sure, I will look that up.");
-  EXPECT_EQ(msg.size(), std::size_t{0});          // nothing was written into the delta_message
 }
 
-// THE reported bug, proven WITHOUT a model: the model opens ‹tool_call› and fully types its
-// inner ‹function=get_weather› ... ‹/function›, but generation turns the corner (|im_end|) one
-// token short of the OUTER ‹/tool_call›.  The inner function is COMPLETE, so this must still be
-// detected as a tool call (finish_reason "tool_calls"), not silently dropped as a plain "stop".
-// It mirrors the live 0.8B under-run; the parser fix (finalize on the inner close when no 2nd
-// function is in flight) is what makes this pass.
+// The reported small-model bug, proven without a model: the model opens the frame and fully types
+// the inner function but the outer close-tag is one byte short (the |im_end| lands first).  The
+// inner function IS complete, so this must still surface as ONE call in the array.
 TEST(ToolCallSupport, ToolCallTruncatedOuterCloseStillFires) {
   Qwen35ToolCallParser p;
-  ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
+  Qwen35BoundarySynthesizer s;
   const std::string full = blockForCall("get_weather", {{"city", "London"}});
-
   ASSERT_FALSE(full.empty());
-  ASSERT_EQ(full[full.size() - 1], GT[0]);          // full ends on the outer ‹/tool_call›
-
-  // Drop ONLY the final byte of the outer close, so the inner ‹/function› is complete but the
-  // outer ‹/tool_call› is not: with the parser fix this is still a finished call (status
-  // TOOL_CALL_STOP + one structured call), exactly what the under-running 0.8B now yields.
-  // `in` is NON-const on purpose: IncrementalParser::parse takes its text as a `std::string&`
-  // (the base contract "modified in place"), so a `const` local would not bind.
+  ASSERT_EQ(full[full.size() - 1], GT[0]);        // last byte is the close-tag's closing byte
   std::string in = full.substr(0, full.size() - 1);
 
-  p.parse(msg, in, std::nullopt);
+  const ov::genai::JsonContainer acc = runSynth(p, s, in);
+
+  ASSERT_TRUE(acc.contains("tool_calls")) << "the truncated call was dropped, not surfaced";  // the ask
+  ASSERT_EQ(acc["tool_calls"].size(), std::size_t{1});
+  EXPECT_EQ(callName(acc["tool_calls"][0]), std::string("get_weather"));
+  ASSERT_TRUE(argCity(acc["tool_calls"][0]).has_value());
+  EXPECT_EQ(*argCity(acc["tool_calls"][0]), std::string("London"));
   EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::TOOL_CALL_STOP));
-  const auto& calls = msg["tool_calls"];
-  ASSERT_TRUE(calls.is_array());
-  ASSERT_EQ(calls.size(), std::size_t{1});
-  EXPECT_EQ(calls[0]["name"].get_string(), "get_weather");
-  EXPECT_EQ(calls[0]["arguments"]["city"].get_string(), "London");
 }
 
-// The close tag straddles a chunk boundary: completion must still be detected on the later
-// chunk (the parser accumulates all decoded text and re-scans from its consume-cursor).
+// The close lands in a LATER chunk than the open (the block straddles a chunk boundary): no
+// premature trigger before the close, and the call is reported only once the close arrives.
 TEST(ToolCallSupport, ToolCallSplitAcrossChunks) {
   Qwen35ToolCallParser p;
-  ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
-  const std::string full = blockForCall("get_weather", {{"city", "London"}});
+  Qwen35BoundarySynthesizer s;
+  std::string full = blockForCall("get_weather", {{"city", "London"}});
+  auto chunks = s.feed(full);
+  ASSERT_GE(chunks.size(), std::size_t{1});
 
-  ASSERT_FALSE(full.empty());
-  ASSERT_EQ(full[full.size() - 1], GT[0]);        // last byte is the › that ends ‹/tool_call ›
-  // With the parser fix (finalize on the inner ‹/function›, not the outer ‹/tool_call›) the
-  // completion point moved inward.  Split JUST AFTER the inner function-name's terminating byte,
-  // so chunk `a` has the inner function OPENED but not yet closed -> a genuinely partial block
-  // that must stay RUNNING (no premature trigger); chunk `b` brings the close and the call is
-  // reported only then, keeping the test's intent (no trigger until the block is complete).
-  const std::size_t kfo = full.find(kFuncOpen);
-  ASSERT_NE(kfo, std::string::npos);
-  const std::size_t fe = full.find(GT, kfo + kFuncOpen.size());
-  ASSERT_NE(fe, std::string::npos);
-  std::string a = full.substr(0, fe + 1);            // ...through the inner function-name's byte
-  ASSERT_FALSE(a.empty());
-  std::string b = full.substr(fe + 1);               // params...‹/function›...‹/tool_call›
+  // Feed the OPEN chunk first -> a started-but-unclosed block must stay RUNNING, no array yet.
+  {
+    ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
+    std::string t = chunks[0].first;
+    const std::string content = p.parse(dm, t, chunks[0].second);
+    dm["content"] = content;
+    EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::RUNNING))
+      << "premature trigger before the close chunk";
+    EXPECT_FALSE(dm.contains("tool_calls"));
+  }
+  // Then feed the rest -> the close arrives -> the call is reported; the array is present.
+  ov::genai::JsonContainer acc = ov::genai::JsonContainer::object();
+  for (std::size_t i = 1; i < chunks.size(); ++i) {
+    ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
+    std::string t = chunks[i].first;
+    const std::string content = p.parse(dm, t, chunks[i].second);
+    dm["content"] = content;
+    acc.concatenate(dm);
+  }
+  if (auto tail = s.flush())
+    for (const auto& ch : *tail) {
+      ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
+      std::string t = ch.first;
+      const std::string content = p.parse(dm, t, ch.second);
+      dm["content"] = content;
+      acc.concatenate(dm);
+    }
 
-  const std::string fa = p.parse(msg, a, std::nullopt);
-  EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::RUNNING));
-  EXPECT_EQ(fa, "");                              // no completed close yet -> nothing, no false trigger
-
-  const std::string fb = p.parse(msg, b, std::nullopt);
   EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::TOOL_CALL_STOP));
-  EXPECT_EQ(fb, "");
-  const auto& calls = msg["tool_calls"];
-  ASSERT_TRUE(calls.is_array());
-  ASSERT_EQ(calls.size(), std::size_t{1});
-  EXPECT_EQ(calls[0]["name"].get_string(), "get_weather");
-  EXPECT_EQ(calls[0]["arguments"]["city"].get_string(), "London");
+  ASSERT_TRUE(acc.contains("tool_calls")) << "no tool_calls array after the close";    // the ask
+  EXPECT_EQ(acc["tool_calls"].size(), std::size_t{1});
+  EXPECT_EQ(callName(acc["tool_calls"][0]), std::string("get_weather"));
+  ASSERT_TRUE(argCity(acc["tool_calls"][0]).has_value());
+  EXPECT_EQ(*argCity(acc["tool_calls"][0]), std::string("London"));
 }
 
-// Leading prose (before any tool block) is emitted as content in the earlier pass, then a
-// later pass that completes the block adds no content -- so the recorded content and the
-// tool_calls carry disjoint information (the block itself is stripped out of the result).
-TEST(ToolCallSupport, ProsePrefixIsEmittedBeforeTheBlock) {
-  Qwen35ToolCallParser p;
-  ov::genai::JsonContainer msg = ov::genai::JsonContainer::object();
-  std::string prefix = "The weather in London is: ";
-
-  const std::string f1 = p.parse(msg, prefix, std::nullopt);
-  EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::RUNNING));
-  EXPECT_EQ(f1, prefix);
-  EXPECT_EQ(msg.size(), std::size_t{0});          // no tool block yet -> nothing recorded
-
-  std::string in = blockForCall("get_weather", {{"city", "London"}});
-  const std::string f2 = p.parse(msg, in, std::nullopt);
-  EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::TOOL_CALL_STOP));
-  EXPECT_EQ(f2, "");                             // the block itself contributes no content
-  const auto& calls = msg["tool_calls"];
-  ASSERT_TRUE(calls.is_array());
-  ASSERT_EQ(calls.size(), std::size_t{1});
-  EXPECT_EQ(calls[0]["name"].get_string(), "get_weather");
-  EXPECT_EQ(calls[0]["arguments"]["city"].get_string(), "London");
-}
-
-// reset() clears the per-turn state (decoded-text buffer, consume-cursor, recorded calls) so
-// a fresh turn completes cleanly: a second block after reset yields exactly ONE new call
-// (not a stale carry-over from turn 1) and a RUNNING status.
+// reset() clears the per-turn state so a fresh turn reports exactly ONE new call (not a stale
+// carry-over from turn 1).
 TEST(ToolCallSupport, ResetClearsPerTurnState) {
   Qwen35ToolCallParser p;
-  ov::genai::JsonContainer msg1 = ov::genai::JsonContainer::object();
+  Qwen35BoundarySynthesizer s;
   std::string d1 = blockForCall("get_weather", {{"city", "Paris"}});
-  p.parse(msg1, d1, std::nullopt);
+  const ov::genai::JsonContainer acc1 = runSynth(p, s, d1);
   ASSERT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::TOOL_CALL_STOP));
+  ASSERT_TRUE(acc1.contains("tool_calls"));
+  ASSERT_EQ(acc1["tool_calls"].size(), std::size_t{1});
+  EXPECT_EQ(argCity(acc1["tool_calls"][0]).value_or(std::string()), std::string("Paris"));
 
   p.reset();
+  s.reset();
   EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::RUNNING));
 
-  ov::genai::JsonContainer msg2 = ov::genai::JsonContainer::object();
   std::string d2 = blockForCall("get_weather", {{"city", "Tokyo"}});
-  const std::string f2 = p.parse(msg2, d2, std::nullopt);
-  EXPECT_EQ(statusOf(p.get_status()), statusOf(ov::genai::StreamingStatus::TOOL_CALL_STOP));
-  const auto& calls = msg2["tool_calls"];
-  ASSERT_TRUE(calls.is_array());
-  ASSERT_EQ(calls.size(), std::size_t{1});        // exactly one, not a stale carry-over
-  EXPECT_EQ(calls[0]["arguments"]["city"].get_string(), "Tokyo");
+  const ov::genai::JsonContainer acc2 = runSynth(p, s, d2);
+  ASSERT_TRUE(acc2.contains("tool_calls"));
+  ASSERT_EQ(acc2["tool_calls"].size(), std::size_t{1});       // exactly one, not a stale carry-over
+  EXPECT_EQ(argCity(acc2["tool_calls"][0]).value_or(std::string()), std::string("Tokyo"));
 }
 
 // D3: one registry = one source of truth.  qwen35 is the only wired format; the rest are
-// advertised-but-unwired (resolve to null -> graceful: no parser, no stop, today's behaviour).
+// advertised-but-unwired (resolve to null -> graceful: no parser, no stop, finish_reason stop).
 TEST(ToolCallSupport, RegistryAdvertisesAllAndWiresQwenOnly) {
   EXPECT_EQ(advertisedToolCallParsers(),
             (std::vector<std::string>{"qwen35", "hermes", "gemma4", "museglimmer"}));
@@ -210,28 +210,49 @@ TEST(ToolCallSupport, RegistryAdvertisesAllAndWiresQwenOnly) {
 }
 
 // D1/D5 -- the model-free core of the auto-detect gate: the model-intrinsic sentinels
-// example_function_name / example_parameter (which Qwen's template renders independent of the
-// user's tools) drive detection; a template with neither matches nothing (graceful), and
-// the sentinels are AND-ed so a template that happens to name only ONE cannot false-trigger.
+// (example_function_name / example_parameter) that Qwen's template renders drive detection; a
+// template with neither matches nothing (graceful); the sentinels are AND-ed so naming only ONE
+// cannot false-trigger.
 TEST(ToolCallSupport, MatchFormatIsModelFree) {
   const std::string hit =
-    LT + "tool_call" + GT + kFuncOpen + kSentfunc + GT
+    kTCOpen + kFuncOpen + kSentfunc + GT
     + kParamOpen + kSentry + GT + "value" + kParamClose + kFuncClose + kTCClose;
   auto got = matchFormat(hit);
   ASSERT_TRUE(got.has_value());
   EXPECT_EQ(*got, std::string("qwen35"));
-
-  EXPECT_FALSE(matchFormat(
-    "a plain chat template with role and content and no tool call block at all").has_value());
+  EXPECT_FALSE(matchFormat("a plain chat template with role and content and no tool call block at all").has_value());
   EXPECT_FALSE(matchFormat("it references " + kSentfunc + " only").has_value());
 }
 
 // The selection precedence: an explicit --tool-call-parser <name> override wins without
-// auto-detect, so a default (empty) Tokenizer is a safe stand-in for this model-free half of
-// the gate (detectToolCallFormat is only reached on the no-override path).
+// auto-detect, so a default (empty) Tokenizer is a safe stand-in for the model-free half.
 TEST(ToolCallSupport, SelectOverrideWinsWithoutModel) {
-  ov::genai::Tokenizer tok;                        // Tokenizer() = default
+  ov::genai::Tokenizer tok;
   auto got = selectToolCallParserName(std::optional<std::string>("gemma4"), tok, nullptr);
   ASSERT_TRUE(got.has_value());
   EXPECT_EQ(*got, std::string("gemma4"));
+}
+
+// BRIDGE REGRESSION -- the model-free half of the real-world bug "finish_reason tool_calls but no
+// tool_calls array".  Only the *LLM* pipeline's run_generate_with_parsers copies a streamer's folded
+// get_parsed_message() into res.parsed[0]; the *VLM* pipeline that `vlm` drives has no such copy, so
+// res.parsed was left EMPTY and emitResult reported the engine's own finish_reason "tool_calls" (set
+// from the parser's TOOL_CALL_STOP) with NO tool_calls array.  The CLI now bridges it.  No model is
+// needed to prove the GRACEFUL half: a plain TextStreamer is NOT a TextParserStreamer, so the bridge's
+// dynamic-cast must MISS and leave res.parsed exactly (empty) as the engine produced it -- the no-parser
+// path must never gain a spurious tool_calls.  (The positive half -- a parser-carrier actually landing
+// tool_calls in res.parsed -- is the fixture-gated live test in qwen35_tool_call_parser_test.cpp.)
+TEST(ToolCallSupport, BridgeIsNoOpForPlainStreamer) {
+  ov::genai::DecodedResults res;                 // parsed empty -- as the VLM pipeline leaves it
+  ASSERT_TRUE(res.parsed.empty()) << "precondition: a fresh result's parsed is empty";
+
+  ov::genai::Tokenizer tok;
+  auto plain = std::make_shared<ov::genai::TextStreamer>(
+      tok, [](std::string) -> ov::genai::CallbackTypeVariant { return ov::genai::StreamingStatus::RUNNING; });
+  std::shared_ptr<ov::genai::StreamerBase> base = plain;   // the engine holds the carrier as a StreamerBase
+
+  bridgeParsedMessage(base, res);
+
+  EXPECT_TRUE(res.parsed.empty())               // cast missed -> res.parsed untouched (no spurious tool_calls)
+    << "bridge fired for a plain TextStreamer; res.parsed was not left as the engine produced it";
 }

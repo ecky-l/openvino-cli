@@ -5,15 +5,21 @@
 // rationale; this TU only carries the BODIES so the header stays a clean interface.
 #include "tool_call_support.hpp"
 
+#include <openvino/genai/llm_pipeline.hpp>       // DecodedResults (full type; the bridge target)
+#include <openvino/genai/text_streamer.hpp>      // TextParserStreamer + get_parsed_message (the source)
+
 namespace ovgenai {
 namespace toolcall {
 
-// --- ContentStreamer (carries the parser; the engine runs the loop + copies the result) --
-// The base's ctor hardcodes EMPTY detokenization params, so its decode() would fall back to the
-// tokenizer's rt_info default (skip_special_tokens = true for these fixtures) and STRIP a leading
-// ‹/thinking› -- for the 0.8B that close-of-thinking IS the whole lead-in before the ‹tool_call›, so
-// the surfaced content would collapse to empty. Setting skip_special_tokens = false here (the same
-// idiom makeAccumulatingStreamer uses at vlm.cpp:470) preserves that lead-in verbatim as-is.
+// --- ContentStreamer (carries the parser; the OpenArc Qwen35ToolCallStreamer analog; the engine
+// runs the loop + copies the result) -- The base's ctor hardcodes EMPTY detokenization params,
+// so its decode() would fall back to the tokenizer's rt_info default (skip_special_tokens = true
+// for these fixtures) and STRIP a leading ‹/thinking› -- for the 0.8B that close-of-thinking IS
+// the whole lead-in before the ‹tool_call›, so the surfaced content would collapse to empty.
+// Setting skip_special_tokens = false here (the same idiom makeAccumulatingStreamer uses at
+// vlm.cpp:470) preserves that lead-in verbatim as-is -- i.e. reasoning flows through as normal
+// content (there is NO reasoning splitter); only the tool block is parsed out into the
+// tool_calls array by the carried parser.
 ContentStreamer::ContentStreamer(const ov::genai::Tokenizer& tok,
                                  std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers,
                                  std::string& acc)
@@ -24,6 +30,19 @@ ContentStreamer::ContentStreamer(const ov::genai::Tokenizer& tok,
 ov::genai::StreamingStatus ContentStreamer::write(ov::genai::JsonContainer& message) {
   m_acc += message["content"].as_string().value_or(std::string());   // -> result
   return ov::genai::StreamingStatus::RUNNING;
+}
+
+// The bridge the *VLM* pipeline omitted (see the header rationale): dynamic_pointer_cast is the gate --
+// it hits only for a parser-carrying streamer (our ContentStreamer, a TextParserStreamer) and misses
+// for a plain TextStreamer (the no-parser engine path, where we must touch nothing).  When it hits we
+// copy the streamer's folded get_parsed_message() into res.parsed[0]; that folded message carries BOTH
+// the content and the one-shot tool_calls array the parser wrote into its private internal message.
+void bridgeParsedMessage(const std::shared_ptr<ov::genai::StreamerBase>& streamer,
+                         ov::genai::DecodedResults& res) {
+  auto tps = std::dynamic_pointer_cast<ov::genai::TextParserStreamer>(streamer);
+  if (!tps) return;
+  if (res.parsed.empty()) res.parsed.resize(1);
+  res.parsed[0] = tps->get_parsed_message();
 }
 
 // --- the registry: every advertised name -> an entry (wired iff `make` is non-null) --------

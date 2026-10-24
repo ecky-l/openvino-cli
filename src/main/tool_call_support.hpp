@@ -1,7 +1,11 @@
 // Tool-call support for the `vlm` subcommand -- the MODEL-GENERIC selection + carrying
 // machinery.  It is a header + cpp pair (the project's model_*_config.{hpp,cpp} idiom):
 // THIS header DECLARES the registry / detect / select functions and the ContentStreamer that
-// carries a selected IncrementalParser into the engine; their method BODIES live in
+// carries a selected IncrementalParser into the engine; the specific carrier is the OpenArc
+// Qwen35ToolCallStreamer analog (ContentStreamer, see the .cpp) -- it keeps the engine's parser
+// loop and content accumulation; there is NO reasoning splitter (reasoning stays on the normal
+// content output, only the tool block is parsed out into the tool_calls array); their method
+// BODIES live in
 // tool_call_support.cpp.  The MODEL-SPECIFIC parsers each live in their own
 // toolcallparsers/<model>_tool_call_parser.{hpp,cpp}: this phase is Qwen35ToolCallParser
 // (with its tag/sentinel constants + its tr/argValue/qwenBlockToCall free helpers); a later
@@ -38,14 +42,20 @@
 #include <string>
 #include <vector>
 
+// Forward declaration (the full type arrives via llm_pipeline.hpp, included in the .cpp) -- the engine-side
+// result whose `parsed` member the bridge fills.  Forward-declared here to keep the header light.
+namespace ov { namespace genai { class DecodedResults; } }
+
 namespace ovgenai {
 namespace toolcall {
 
-// A TextParserStreamer subclass that carries an IncrementalParser (so the engine runs the
-// parser loop AND copies its get_parsed_message() into res.parsed[0]) while the streamer
-// appends the (specials-preserving) content to the caller's accumulated output.  The
-// pure-virtual write(JsonContainer&) is the one that fires; the string-write base drives the
-// parser loop and calls it.  (Method bodies in tool_call_support.cpp.)
+// A TextParserStreamer subclass that carries an IncrementalParser (the OpenArc
+// Qwen35ToolCallStreamer analog): the base keeps the parser loop and copies its
+// get_parsed_message() into res.parsed[0], while this streamer appends the (specials-preserving)
+// content to the caller's accumulated output.  There is NO reasoning splitter -- reasoning stays
+// on the normal content output; only the tool block is parsed out (by the parser) into the
+// tool_calls array.  The pure-virtual write(JsonContainer&) is the one that fires; the string-
+// write base drives the parser loop and calls it.  (Method bodies in tool_call_support.cpp.)
 class ContentStreamer : public ov::genai::TextParserStreamer {
 public:
   ContentStreamer(const ov::genai::Tokenizer& tok,
@@ -55,6 +65,18 @@ public:
 private:
   std::string& m_acc;                        // the output the caller drains (specials preserved)
 };
+
+// The engine-side copy the *VLM* pipeline never performs: only the *LLM* pipeline's run_generate_with_parsers
+// copies a TextParserStreamer's folded get_parsed_message() into res.parsed[0].  The VLM pipeline that
+// `vlm` drives leaves res.parsed EMPTY, so a tool-call turn would otherwise report the engine's own
+// finish_reason "tool_calls" (set from the parser's TOOL_CALL_STOP) yet carry NO tool_calls array.  The
+// CLI still holds the carrier, so we reproduce the copy: for a TextParserStreamer (our ContentStreamer) we
+// copy its folded message -- content PLUS the one-shot tool_calls array the parser wrote into its private
+// message -- into res.parsed[0]; a plain TextStreamer is not a TextParserStreamer, so the cast misses and
+// res.parsed is left exactly as the engine produced it (graceful fallback: no tool_calls, finish_reason
+// stays as the engine's own).
+void bridgeParsedMessage(const std::shared_ptr<ov::genai::StreamerBase>& streamer,
+                         ov::genai::DecodedResults& res);
 
 // --- the registry + detection / selection (bodies in tool_call_support.cpp) ------------
 // One source of truth: every advertised (validated) name is an entry; an entry is "wired"

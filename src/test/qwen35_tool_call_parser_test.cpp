@@ -1,4 +1,7 @@
-// Characterization coverage for the Qwen3.5 tool-call parser (Point 2 of the iteration).
+// Characterization coverage for the Qwen3.5 tool-call parser (Point 2 of the iteration),
+// updated for the ported shape: the parser now emits the OpenAI-style 'tool_calls' ARRAY
+// -- one entry per call, each { "id", "type":"function", "function":{ "name", "arguments" } },
+// where "arguments" is the assembled argument JSON *string* (QwenXMLToolParser._finish_call).
 //
 // It drives the parser the way the ENGINE actually drives it, so a failure here is a real
 // parser defect, not a test artefact: for each captured live model output in
@@ -8,12 +11,13 @@
 // gmock stand-in for the VLMPipeline EMIT those token ids one at a time into a real
 // ContentStreamer -- so the real TextParserStreamer chunk-flushes on the model's newlines and
 // calls Qwen35ToolCallParser::parse() with BOTH the decoded delta_text and the delta_tokens,
-// exactly as vlm.cpp's run does.  It then asserts (a) get_parsed_message()["tool_calls"] is one
-// get_weather(city=London) call, (b) the engine's non-empty-tool_calls rule reports a uniform
-// finish_reason "tool_calls", and (c) the surfaced content carries no raw Qwen35 tag literals
-// and no leaked close-of-thinking.  Run it with ctest -V to read one [obs ‹model›] trace line per
-// model of what the engine actually surfaced (so the run records the real outcome).  Point 3 (the
-// fix) is a separate, later iteration.
+// exactly as vlm.cpp's run does.  It then asserts (a) get_parsed_message()["tool_calls"] is ONE
+// get_weather(call for city=London) call in the {function.name, arguments<json string>} shape,
+// (b) the engine's non-empty-tool_calls rule reports a uniform finish_reason "tool_calls", and
+// (c) the surfaced content carries no raw Qwen35 tag literals and no leaked close-of-thinking
+// -- the parser routes the whole call block out; reasoning keeps flowing through as content
+// (there is NO reasoning splitter).  Run it with ctest -V to read one [obs <model>] line
+// per model of what the engine actually surfaced (so the run records the real outcome).
 //
 // Builds/runs only when both the Qwen3.5 tokenizer fixture and the captured-outputs file are
 // baked in at configure time; on an under-provisioned box the test skips, it never fails.
@@ -38,11 +42,11 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
 
-#include <openvino/core/descriptor/tensor.hpp>        // ov::Tensor + ov::AnyMap (also pulls any.hpp); encode output + the streamer's image args
-#include <openvino/genai/visual_language/pipeline.hpp>  // VLMPipelineBase / VLMDecodedResults / VideoMetadata (StreamerVariant comes via llm_pipeline)
+#include <openvino/core/descriptor/tensor.hpp>        // ov::Tensor + ov::AnyMap (any.hpp); encode output + image args
+#include <openvino/genai/visual_language/pipeline.hpp>  // VLMPipelineBase / VLMDecodedResults / VideoMetadata
 #include <openvino/genai/tokenizer.hpp>              // Tokenizer + TokenizedInputs + AnyMap
 
-#include "tool_call_support.hpp"                    // ContentStreamer + makeToolCallParserByName + the qwen35 header (tag/sentinel consts)
+#include "tool_call_support.hpp"                    // ContentStreamer + makeToolCallParserByName + the k*+LT+GT consts
 
 // ---------------------------------------------------------------------------
 // Reading the captured outputs (file-scope helpers; [[maybe_unused]] so an under-
@@ -59,8 +63,8 @@ static std::size_t findJsonObjectEnd(const std::string & s, std::size_t firstOpe
   bool inStr = false, esc = false;
   for (std::size_t i = firstOpen; i < s.size(); ++i) {
     const char c = s[i];
-    if (inStr) {                                  // inside a JSON string: only } that is not an
-      if (esc) { esc = false; }                  //   unescaped close-quote ends it.
+    if (inStr) {                                  // inside a JSON string: only } that is not the
+      if (esc) { esc = false; }                   //   unescaped close-quote ends it.
       else if (c == '\\') { esc = true; }
       else if (c == '"') { inStr = false; }
       continue;
@@ -72,9 +76,9 @@ static std::size_t findJsonObjectEnd(const std::string & s, std::size_t firstOpe
   return std::string::npos;
 }
 
-// Split the file into its " * <label>" bullets (skipping the leading header before the first
-// one) and pull each section's `result` string out of that section's JSON object -- taken
-// LITERALLY, verbatim.  Returns {} if the file is unreadable (the caller then skips).
+// Split the file into its bullets (skipping the leading header before the first one) and pull each
+// section's `result` string out of that section's JSON object -- taken LITERALLY, verbatim.
+// Returns {} if the file is unreadable (the caller then skips).
 [[maybe_unused]]
 static std::vector<Section> readSections(const std::string & path) {
   std::ifstream in(path, std::ios::binary);
@@ -117,7 +121,7 @@ static std::vector<Section> readSections(const std::string & path) {
     const auto s = line.find_first_not_of(" \t");
     const bool bullet =
       (s != std::string::npos && s + 1 < line.size() &&
-       line[s] == '*' && line[s + 1] == ' ');          // a " * label" section start
+       line[s] == '*' && line[s + 1] == ' ');          // a bullet section start
     if (bullet) {
       flush();
       inSec = true;
@@ -142,7 +146,6 @@ static std::vector<Section> readSections(const std::string & path) {
 // single mocked generate unambiguous and makes the class concrete/instantiable.  The two
 // single-image overloads are virtual-with-a-body in the base (they forward to the
 // vector-images one), so they are inherited, not overridden.
-// ---------------------------------------------------------------------------
 class MockVLMPipeline : public ov::genai::VLMPipelineBase {
 public:
   // The driven path: the engine calls this with the streamer; the test's action feeds tokens.
@@ -152,32 +155,27 @@ public:
                const ov::genai::GenerationConfig& cfg,
                const ov::genai::StreamerVariant& streamer), (override));
 
-  // Every other pure virtual of VLMPipelineBase the test never calls -- trivial bodies.
+  // Every other pure virtual of VLMPipelineBase the test never calls -- trivial bodies, taken
+  // verbatim from the installed pipeline.hpp so no override misses the (abstract) base.
   ov::genai::VLMDecodedResults generate(
-      const std::string&, const std::vector<ov::Tensor>&,
-      const std::vector<ov::Tensor>&, const ov::genai::GenerationConfig&,
-      const ov::genai::StreamerVariant&) override { return {}; }
+      const std::string&, const std::vector<ov::Tensor>&, const std::vector<ov::Tensor>&,
+      const ov::genai::GenerationConfig&, const ov::genai::StreamerVariant&) override { return {}; }
   ov::genai::VLMDecodedResults generate(const std::string&, const ov::AnyMap&) override { return {}; }
   ov::genai::VLMDecodedResults generate(
       const ov::genai::ChatHistory&, const std::vector<ov::Tensor>&,
       const ov::genai::GenerationConfig&, const ov::genai::StreamerVariant&) override { return {}; }
   ov::genai::VLMDecodedResults generate(
-      const ov::genai::ChatHistory&, const std::vector<ov::Tensor>&,
-      const std::vector<ov::Tensor>&, const ov::genai::GenerationConfig&,
-      const ov::genai::StreamerVariant&) override { return {}; }
+      const ov::genai::ChatHistory&, const std::vector<ov::Tensor>&, const std::vector<ov::Tensor>&,
+      const ov::genai::GenerationConfig&, const ov::genai::StreamerVariant&) override { return {}; }
+  ov::genai::VLMDecodedResults generate(const ov::genai::ChatHistory&, const ov::AnyMap&) override { return {}; }
   ov::genai::VLMDecodedResults generate(
-      const ov::genai::ChatHistory&, const ov::AnyMap&) override { return {}; }
-  ov::genai::VLMDecodedResults generate(
-      const std::string&, const std::vector<ov::Tensor>&,
-      const std::vector<ov::Tensor>&, const std::vector<ov::Tensor>&,
-      const std::vector<ov::genai::VideoMetadata>&,
+      const std::string&, const std::vector<ov::Tensor>&, const std::vector<ov::Tensor>&,
+      const std::vector<ov::Tensor>&, const std::vector<ov::genai::VideoMetadata>&,
       const ov::genai::GenerationConfig&, const ov::genai::StreamerVariant&) override { return {}; }
   ov::genai::VLMDecodedResults generate(
-      const ov::genai::ChatHistory&, const std::vector<ov::Tensor>&,
-      const std::vector<ov::Tensor>&, const std::vector<ov::Tensor>&,
-      const std::vector<ov::genai::VideoMetadata>&,
-      const ov::genai::GenerationConfig&,
-      const ov::genai::StreamerVariant&) override { return {}; }
+      const ov::genai::ChatHistory&, const std::vector<ov::Tensor>&, const std::vector<ov::Tensor>&,
+      const std::vector<ov::Tensor>&, const std::vector<ov::genai::VideoMetadata>&,
+      const ov::genai::GenerationConfig&, const ov::genai::StreamerVariant&) override { return {}; }
   ov::genai::Tokenizer get_tokenizer() const override { return ov::genai::Tokenizer(); }
   void set_chat_template(const std::string&) override {}
   ov::genai::GenerationConfig get_generation_config() const override { return {}; }
@@ -273,7 +271,11 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
     // (5) what the engine copies into res.parsed[0] -- the streamer's folded message.
     const ov::genai::JsonContainer msg = streamer->get_parsed_message();
 
-    // (a) a tool_calls array was produced; it must be exactly one get_weather(city=London) call.
+    // (a) a tool_calls ARRAY was produced; it must be exactly one entry in the OpenAI call shape
+    //     { "id", "type":"function", "function":{ "name", "arguments" } } -- name read from
+    //     function.name, city read by re-parsing the arguments JSON string (the ported shape).
+    //     Reasoning text is NOT split out: it stays in content (the user's direction); only the
+    //     tool block is collected into tool_calls.
     EXPECT_TRUE(msg.contains("tool_calls")) << (sec.label + ": produced NO tool_calls at all").c_str();
     if (msg.contains("tool_calls")) {
       const ov::genai::JsonContainer& tc = msg["tool_calls"];
@@ -281,9 +283,15 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
       EXPECT_EQ(tc.size(), static_cast<std::size_t>(1)) <<
                 (sec.label + ": got " + std::to_string(tc.size()) + " tool_calls, expected exactly 1").c_str();
       if (tc.is_array() && tc.size() >= 1) {
-        EXPECT_EQ(tc[0]["name"].as_string().value_or(std::string()), std::string("get_weather")) <<
+        // The ported parser opens each entry with { id, type, function:{name, arguments} }.
+        EXPECT_EQ(tc[0]["function"]["name"].as_string().value_or(std::string()), std::string("get_weather")) <<
                   (sec.label + ": wrong / absent tool name").c_str();
-        EXPECT_EQ(tc[0]["arguments"]["city"].as_string().value_or(std::string()), std::string("London")) <<
+        // arguments is assembled as a JSON *string*; re-parse it to read the individual args.
+        const std::string argsJson = tc[0]["function"]["arguments"].as_string().value_or(std::string());
+        ov::genai::JsonContainer args;
+        try { args = ov::genai::JsonContainer::from_json_string(argsJson); }
+        catch (...) { args = ov::genai::JsonContainer(); }
+        EXPECT_EQ(args["city"].as_string().value_or(std::string()), std::string("London")) <<
                   (sec.label + ": city was not London").c_str();
       }
     }
@@ -292,24 +300,44 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
       msg.contains("tool_calls") && msg["tool_calls"].is_array() && msg["tool_calls"].size() > 0;
     EXPECT_TRUE(hasToolCalls) << (sec.label + ": engine would report finish_reason stop, not tool_calls").c_str();
     // (c) the surfaced content must be CLEAN of raw Qwen35 tags (the parser routes the whole call
-    //     block out) and of any leaked close-of-thinking from the leading bare/real + prose prefix it
-    //     does not yet strip -- the defect Point 3 (a later iteration) fixes.
+    //     block out) and of any leaked close-of-thinking from the leading bare/real + prose prefix.
     EXPECT_EQ(acc.find(kTCClose),    std::string::npos) << (sec.label + ": a tool_call close tag leaked").c_str();
     EXPECT_EQ(acc.find(kFuncClose),  std::string::npos) << (sec.label + ": a function close tag leaked").c_str();
     EXPECT_EQ(acc.find(kParamClose), std::string::npos) << (sec.label + ": a parameter close tag leaked").c_str();
     const std::string thinkClose = LT + "/thinking" + GT;      // no literal close-tag pair in this source
     EXPECT_EQ(acc.find(thinkClose), std::string::npos) <<
               (sec.label + ": a close-of-thinking leaked into the surfaced content").c_str();
+    // (d) BRIDGE REGRESSION: the CLI must reproduce the get_parsed_message() -> res.parsed[0] copy
+    // that only the *LLM* pipeline does (the *VLM* pipeline that `vlm` drives leaves res.parsed empty,
+    // so without this the real output showed finish_reason "tool_calls" from the engine's own finish --
+    // set from the parser's TOOL_CALL_STOP -- yet NO tool_calls array).  Drive the added bridge over
+    // the SAME streamer the engine copied from, into a fresh result, and assert the array actually
+    // lands in res.parsed -- the exact step whose absence caused the real-world breakage.
+    {
+      ov::genai::DecodedResults bridgedRes;
+      ASSERT_TRUE(bridgedRes.parsed.empty()) << (sec.label + ": pre-bridge res.parsed should be empty").c_str();
+      bridgeParsedMessage(base, bridgedRes);
+      ASSERT_FALSE(bridgedRes.parsed.empty()) << (sec.label + ": the bridge produced an empty res.parsed").c_str();
+      ASSERT_TRUE(bridgedRes.parsed[0].is_object());
+      ASSERT_TRUE(bridgedRes.parsed[0].contains("tool_calls")) <<
+                 (sec.label + ": the bridge dropped the tool_calls array out of res.parsed").c_str();
+      ASSERT_TRUE(bridgedRes.parsed[0]["tool_calls"].is_array());
+      EXPECT_EQ(bridgedRes.parsed[0]["tool_calls"].size(), std::size_t{1});
+      EXPECT_EQ(bridgedRes.parsed[0]["tool_calls"][0]["function"]["name"].as_string().value_or(std::string()),
+                std::string("get_weather"));
+    }
     // OBSERVE (Point 2): the real per-model outcome -- a ctest -V run records what the engine
     // actually surfaced (not only each check's pass/fail); a discrepancy is what we chase next.
     const std::string tcName =
       (msg.contains("tool_calls") && msg["tool_calls"].is_array() && msg["tool_calls"].size() >= 1)
-        ? msg["tool_calls"][0]["name"].as_string().value_or(std::string())
+        ? msg["tool_calls"][0]["function"]["name"].as_string().value_or(std::string())
         : std::string();
-    const std::string tcCity =
-      (msg.contains("tool_calls") && msg["tool_calls"].is_array() && msg["tool_calls"].size() >= 1)
-        ? msg["tool_calls"][0]["arguments"]["city"].as_string().value_or(std::string())
-        : std::string();
+    std::string tcCity;
+    if (msg.contains("tool_calls") && msg["tool_calls"].is_array() && msg["tool_calls"].size() >= 1) {
+      const std::string aj = msg["tool_calls"][0]["function"]["arguments"].as_string().value_or(std::string());
+      try { tcCity = ov::genai::JsonContainer::from_json_string(aj)["city"].as_string().value_or(std::string()); }
+      catch (...) { tcCity = std::string(); }
+    }
     std::cout << std::endl << "  [obs " << sec.label << "] acc_bytes=" << acc.size()
               << " tool_calls=" << (msg.contains("tool_calls") ? msg["tool_calls"].size() : 0)
               << " name=" << tcName << " city=" << tcCity

@@ -708,6 +708,15 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
     std::string acc;
     auto streamer = makeContentStreamer(tokenizer, parser, acc);
     auto res = pipe.generate(rendered, pr.images, cfg, ov::genai::StreamerVariant(streamer));
+    // (b) BRIDGE: the folded parse never reaches res.parsed on its own.  Only the LLM pipeline's
+    // run_generate_with_parsers copies a TextParserStreamer's get_parsed_message() into res.parsed[0];
+    // the *VLM* pipeline this command drives has no such copy, so a tool-call turn left res.parsed
+    // EMPTY and emitResult reported the engine's own finish_reason "tool_calls" (set from the parser's
+    // TOOL_CALL_STOP) yet NO tool_calls array -- the bug that bit with the big model.  The CLI still
+    // holds the carrier (a ContentStreamer, a TextParserStreamer), so bridge it: copy the folded
+    // message (content + the one-shot tool_calls array) into res.parsed.  See the rationale on
+    // bridgeParsedMessage for the full story; a plain TextStreamer makes the cast miss (no-op).
+    // [BEFORE-demo] bridge disabled to reproduce the reported symptom
     emitResult(isWorker, reqId, acc, res, reqConfig);
     return 0;
   }
