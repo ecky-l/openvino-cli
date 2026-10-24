@@ -240,10 +240,10 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
     ASSERT_FALSE(emitted.empty());
     // (3) the REAL parser run the way the engine runs it: a ContentStreamer carrying it and
     //     accumulating surfaced content into `acc`; the engine-facing variant = shared_ptr<StreamerBase>.
-    std::shared_ptr<ov::genai::IncrementalParser> qparser = makeToolCallParserByName("qwen35");
-    ASSERT_TRUE(static_cast<bool>(qparser));
+    auto qparser = makeToolCallParserByName("qwen35");   // the [reasoner, tool-parser] list
+    ASSERT_FALSE(qparser.empty());
     std::string acc;
-    auto streamer = std::make_shared<ContentStreamer>(tok, std::vector<std::shared_ptr<ov::genai::IncrementalParser>>{qparser}, acc);
+    auto streamer = std::make_shared<ContentStreamer>(tok, qparser, acc);
     auto base = std::static_pointer_cast<ov::genai::StreamerBase>(streamer);
     ov::genai::StreamerVariant sv = base;
     // (4) the gmock model EMITS the tokens one-at-a-time then flushes -- the engine's exact path, so

@@ -85,7 +85,11 @@ void bridgeParsedMessage(const std::shared_ptr<ov::genai::StreamerBase>& streame
 struct ToolCallFormatSpec {
   std::string name;
   std::vector<std::string> sentinels;
-  std::function<std::shared_ptr<ov::genai::IncrementalParser>()> make;
+  // The ordered parser list for this format (see makeToolCallParserByName).  For qwen35 it is two,
+  // in order: a ReasoningIncrementalParser (expect_open_tag=false) that splits reasoning off into a
+  // reasoning_content key and rewrites content, then the model-specific tool parser that adds the
+  // tool_calls key.  An unwired (not-yet-implemented) format carries an empty (null) function.
+  std::function<std::vector<std::shared_ptr<ov::genai::IncrementalParser>>()> make;
 };
 
 // Every advertised name -> an entry (wired iff `make` is non-null); the registry owns the
@@ -94,8 +98,11 @@ const std::vector<ToolCallFormatSpec>& knownToolCallFormats();
 // The flat list of every advertised (validated) --tool-call-parser name (the one source the
 // CLI-flag validation reads).
 std::vector<std::string> advertisedToolCallParsers();
-// Build a parser for a (validated) name, or nullptr if the name is advertised-but-unwired.
-std::shared_ptr<ov::genai::IncrementalParser> makeToolCallParserByName(const std::string& name);
+// Build the ordered parser list for a (validated) name, or an empty list if advertised-but-unwired.
+// For qwen35 the list is two, in order: a ReasoningIncrementalParser (expect_open_tag=false -- Qwen's
+// open-tag is pre-filled in the prompt) that strips reasoning into reasoning_content and rewrites the
+// content key, then the model-specific Qwen35ToolCallParser that adds the tool_calls key.
+std::vector<std::shared_ptr<ov::genai::IncrementalParser>> makeToolCallParserByName(const std::string& name);
 // Render the model's OWN loaded template with a probe tool arg and match that against the
 // registry sentinels; nullopt if none match (graceful: no parser, no turn-stop).
 std::optional<std::string> detectToolCallFormat(const ov::genai::Tokenizer& tok);

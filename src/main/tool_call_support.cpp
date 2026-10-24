@@ -7,6 +7,9 @@
 
 #include <openvino/genai/llm_pipeline.hpp>       // DecodedResults (full type; the bridge target)
 #include <openvino/genai/text_streamer.hpp>      // TextParserStreamer + get_parsed_message (the source)
+#include <openvino/genai/parsers.hpp>            // ReasoningIncrementalParser (the prepended reasoning splitter)
+
+#include <cstdio>                                // fputs / fputc / fflush -- the per-chunk JSON emit
 
 namespace ovgenai {
 namespace toolcall {
@@ -28,7 +31,17 @@ ContentStreamer::ContentStreamer(const ov::genai::Tokenizer& tok,
 }
 
 ov::genai::StreamingStatus ContentStreamer::write(ov::genai::JsonContainer& message) {
-  m_acc += message["content"].as_string().value_or(std::string());   // -> result
+  // Stream the result: on EVERY decoded chunk, emit the string repr of the delta message the parsers
+  // just filled (content, the reasoner's reasoning_content, and a one-shot tool_calls on the chunk
+  // where a call completes) as one compact JSON line -- replacing the old "accumulate then emit at the
+  // end".  to_json_string(-1) is the compact dumper (the worker stays one physical line).
+  std::string line = message.to_json_string(-1);
+  std::fputs(line.c_str(), stdout);
+  std::fputc('\n', stdout);
+  std::fflush(stdout);
+  // Also keep a plain (reasoning-stripped) content accumulator: unused by the terminal emitResult
+  // (the content now streams per chunk), but still read by the per-model leak/obs test checks.
+  m_acc += message["content"].as_string().value_or(std::string());
   return ov::genai::StreamingStatus::RUNNING;
 }
 
@@ -53,8 +66,16 @@ void bridgeParsedMessage(const std::shared_ptr<ov::genai::StreamerBase>& streame
 const std::vector<ToolCallFormatSpec>& knownToolCallFormats() {
   static const std::vector<ToolCallFormatSpec> kSpecs = {
     { "qwen35", { kSentfunc, kSentry },
-      []() { return std::static_pointer_cast<ov::genai::IncrementalParser>(
-                     std::make_shared<Qwen35ToolCallParser>()); } },
+      // Ordered parser list: the reasoning splitter FIRST (expect_open_tag=false -- the Qwen open-tag is
+      // pre-filled in the prompt; keep_original_content=false so reasoning is stripped out of content),
+      // then the model-specific tool parser (it adds the tool_calls key).
+      []() { return std::vector<std::shared_ptr<ov::genai::IncrementalParser>>{
+        std::static_pointer_cast<ov::genai::IncrementalParser>(
+            std::make_shared<ov::genai::ReasoningIncrementalParser>(
+                /*expect_open_tag=*/false, /*keep_original_content=*/false)),
+        std::static_pointer_cast<ov::genai::IncrementalParser>(
+            std::make_shared<Qwen35ToolCallParser>()),
+      }; } },
     { "hermes",      { }, nullptr },
     { "gemma4",      { }, nullptr },
     { "museglimmer", { }, nullptr },
@@ -69,11 +90,11 @@ std::vector<std::string> advertisedToolCallParsers() {
   return v;
 }
 
-std::shared_ptr<ov::genai::IncrementalParser> makeToolCallParserByName(const std::string& name) {
+std::vector<std::shared_ptr<ov::genai::IncrementalParser>> makeToolCallParserByName(const std::string& name) {
   for (const auto& s : knownToolCallFormats())
     if (s.name == name && s.make)
       return s.make();
-  return nullptr;
+  return {};
 }
 
 // --- detect the model's format from its OWN loaded template (render a probe, match sentinels)

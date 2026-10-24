@@ -482,12 +482,11 @@ std::shared_ptr<ov::genai::StreamerBase> makeAccumulatingStreamer(
 // TextStreamer: no .tool_calls, no TOOL_CALL_STOP, finish_reason stays stop.
 std::shared_ptr<ov::genai::StreamerBase> makeContentStreamer(
     const ov::genai::Tokenizer& tok,
-    const std::optional<std::shared_ptr<ov::genai::IncrementalParser>>& parser,
+    const std::vector<std::shared_ptr<ov::genai::IncrementalParser>>& parsers,
     std::string& acc) {
-  if (!parser.has_value() || !*parser)
+  if (parsers.empty())
     return makeAccumulatingStreamer(tok, acc);
-  std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers{std::move(*parser)};
-  return std::make_shared<::ovgenai::toolcall::ContentStreamer>(tok, std::move(parsers), acc);
+  return std::make_shared<::ovgenai::toolcall::ContentStreamer>(tok, parsers, acc);
 }
 
 // (c) native finish_reason -> the wire field (null for NONE).
@@ -518,7 +517,8 @@ void addNumMember(std::string& out, const std::string& key, double x) {
 void emitResult(bool isWorker, std::int64_t reqId,
                 const std::string& text,
                 const ov::genai::VLMDecodedResults& res,
-                const ovgenai::config::ModelRequestConfig& reqConfig) {
+                const ovgenai::config::ModelRequestConfig& reqConfig,
+                bool streamed = false) {
   // (b) The structured tool-call read from the streamer (a TextParserStreamer subclass) lands in
   // res.parsed[0]["tool_calls"], which the engine copies from get_parsed_message() (the parser
   // flips TOOL_CALL_STOP when a call is complete).  We key EVERYTHING off that, NOT off the
@@ -562,11 +562,12 @@ void emitResult(bool isWorker, std::int64_t reqId,
     put(std::string("\"type\":\"RESULT\""));
     put("\"req_id\":" + std::to_string(reqId));
   }
-  put("\"result\":\"" + jsonEscape(out) + "\"");
+  if (!streamed)
+    put("\"result\":\"" + jsonEscape(out) + "\"");
 
   // (b) the structured tool calls, if any -- one compact array so the worker's single-line
   // JSONL stays one physical line (to_json_string(-1) is the compact dumper).
-  if (hasToolCalls)
+  if (!streamed && hasToolCalls)
     put(std::string("\"tool_calls\":") + res.parsed[0]["tool_calls"].to_json_string(-1));
 
   // The PARSER is the authority for a tool-call turn: a non-empty tool_calls wins over the
@@ -690,11 +691,11 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
     std::optional<std::string> detectedName;
     const auto parserName = ::ovgenai::toolcall::selectToolCallParserName(
         reqConfig.tool_call_parser, tokenizer, &detectedName);
-    std::optional<std::shared_ptr<ov::genai::IncrementalParser>> parser;
+    std::vector<std::shared_ptr<ov::genai::IncrementalParser>> powers;
     if (parserName.has_value() && !parserName->empty()) {
       auto p = ::ovgenai::toolcall::makeToolCallParserByName(*parserName);
-      if (p) {
-        parser = std::move(p);
+      if (!p.empty()) {
+        powers = std::move(p);
         std::fprintf(stderr, "ovgenai: vlm: using tool-call parser '%s'\n", parserName->c_str());
       } else {
         std::fprintf(stderr, "ovgenai: vlm: --tool-call-parser '%s' is advertised but not yet "
@@ -706,7 +707,7 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
                            "chat template\n", detectedName->c_str());
     }
     std::string acc;
-    auto streamer = makeContentStreamer(tokenizer, parser, acc);
+    auto streamer = makeContentStreamer(tokenizer, powers, acc);
     auto res = pipe.generate(rendered, pr.images, cfg, ov::genai::StreamerVariant(streamer));
     // (b) BRIDGE: the folded parse never reaches res.parsed on its own.  Only the LLM pipeline's
     // run_generate_with_parsers copies a TextParserStreamer's get_parsed_message() into res.parsed[0];
@@ -716,8 +717,16 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
     // holds the carrier (a ContentStreamer, a TextParserStreamer), so bridge it: copy the folded
     // message (content + the one-shot tool_calls array) into res.parsed.  See the rationale on
     // bridgeParsedMessage for the full story; a plain TextStreamer makes the cast miss (no-op).
-    // [BEFORE-demo] bridge disabled to reproduce the reported symptom
-    emitResult(isWorker, reqId, acc, res, reqConfig);
+    // Copy the streamer's folded message (content + reasoning_content + the one-shot tool_calls)
+    // into res.parsed, which the VLM pipeline never does on its own (only the LLM pipeline's
+    // run_generate_with_parsers makes that copy), so a tool call would otherwise report the engine's
+    // own finish_reason yet carry NO tool_calls.  Re-enables the bridge a previous pass had
+    // commented out for the [BEFORE-demo] of that symptom.
+    ::ovgenai::toolcall::bridgeParsedMessage(streamer, res);
+    // The content + reasoning_content have already streamed to stdout per chunk (this streamer emits
+    // them live), so the terminal line carries only finish_reason + metrics + gen_config -- pass
+    // /*streamed=*/true; it no longer re-emits result / reasoning_content / tool_calls.
+    emitResult(isWorker, reqId, acc, res, reqConfig, /*streamed=*/true);
     return 0;
   }
 

@@ -204,9 +204,18 @@ TEST(ToolCallSupport, ResetClearsPerTurnState) {
 TEST(ToolCallSupport, RegistryAdvertisesAllAndWiresQwenOnly) {
   EXPECT_EQ(advertisedToolCallParsers(),
             (std::vector<std::string>{"qwen35", "hermes", "gemma4", "museglimmer"}));
-  EXPECT_NE(makeToolCallParserByName("qwen35"), nullptr);   // wired -> a real parser
-  EXPECT_EQ(makeToolCallParserByName("hermes"), nullptr);   // advertised, not wired
-  EXPECT_EQ(makeToolCallParserByName("nope"), nullptr);
+  // qwen35 is wired -> a non-empty parser list of two, ORDERED: the reasoning splitter (it moves the
+  // reasoning into reasoning_content and clears it from content) first, then the model-specific
+  // Qwen35ToolCallParser (it adds the tool_calls key).  The earlier single-parser shape is gone.
+  auto qwen = makeToolCallParserByName("qwen35");
+  ASSERT_FALSE(qwen.empty()) << "qwen35 must be wired -> a non-empty parser list";
+  ASSERT_EQ(qwen.size(), std::size_t{2});
+  EXPECT_NE(dynamic_cast<ov::genai::ReasoningIncrementalParser*>(qwen[0].get()), nullptr)
+    << "list[0] must be the ReasoningIncrementalParser (the reasoning splitter)";
+  EXPECT_NE(dynamic_cast<Qwen35ToolCallParser*>(qwen[1].get()), nullptr)
+    << "list[1] must be the Qwen35ToolCallParser (the tool parser)";
+  EXPECT_TRUE(makeToolCallParserByName("hermes").empty());   // advertised, not wired
+  EXPECT_TRUE(makeToolCallParserByName("nope").empty());
 }
 
 // D1/D5 -- the model-free core of the auto-detect gate: the model-intrinsic sentinels
