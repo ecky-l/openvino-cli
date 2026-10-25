@@ -456,36 +456,17 @@ ParsedRequest translateGenConfig(const rapidjson::Value& g) {
   return pr;
 }
 
-// (b) the specials-preserving streamer: detokenizes with skip_special_tokens
-// = false so the CLI accumulates the *full* decoded text (
-//  etc. intact); the engine's own result.texts is stripped (see the module
-// header).  The lambda returns StreamingStatus::RUNNING so the CLI never stops
-// generation itself -- the engine's own eos/stop drives the (c) finish reason.
-std::shared_ptr<ov::genai::StreamerBase> makeAccumulatingStreamer(
-    const ov::genai::Tokenizer& tok, std::string& acc) {
-  auto cb = [&acc](std::string chunk) -> ov::genai::CallbackTypeVariant {
-    acc += std::move(chunk);
-    return ov::genai::StreamingStatus::RUNNING;
-  };
-  ov::AnyMap detok{ ov::genai::skip_special_tokens(false) };
-  return std::make_shared<ov::genai::TextStreamer>(tok, cb, detok);
-}
-
-// (b) The parser-aware streamer for the (tools | kwargs) pre-apply path.  When a
-// tool-call parser is selected (an explicit --tool-call-parser, else auto-detected
-// from the model's OWN rendered template -- see selectToolCallParserName) we carry it
-// in a ContentStreamer, a TextParserStreamer subclass: the engine both runs the parser
-// loop AND copies its get_parsed_message() (which, on a completed call, holds .tool_calls)
-// into res.parsed[0] -- it copies parsed[0] regardless of cfg.parsers, because it first
-// dynamic-casts the streamer to TextParserStreamer -- so we run the parser IN the streamer
-// and leave cfg.parsers empty.  With no selection it keeps today's plain accumulating
-// TextStreamer: no .tool_calls, no TOOL_CALL_STOP, finish_reason stays stop.
+// (b) The parser-aware streamer: ALWAYS a ContentStreamer, a TextParserStreamer subclass.  The
+// engine runs the parser loop and (we bridge the *VLM* pipeline's one gap) copies its
+// get_parsed_message() -- content, the reasoner's reasoning_content, and a one-shot tool_calls on
+// a completed call -- so we run the parser IN the streamer and leave cfg.parsers empty.  Even an
+// empty `parsers` list (the no-reasoning, no-tool case) gets a ContentStreamer: the base
+// TextParserStreamer then just fills the content key after the (empty) parser loop, so content
+// still streams per chunk -- there is no separate accumulating streamer any more.
 std::shared_ptr<ov::genai::StreamerBase> makeContentStreamer(
     const ov::genai::Tokenizer& tok,
     const std::vector<std::shared_ptr<ov::genai::IncrementalParser>>& parsers,
     std::string& acc) {
-  if (parsers.empty())
-    return makeAccumulatingStreamer(tok, acc);
   return std::make_shared<::ovgenai::toolcall::ContentStreamer>(tok, parsers, acc);
 }
 
@@ -635,6 +616,27 @@ void emitWorkerError(const std::string& msg, std::int64_t reqId = 0) {
   std::fflush(stdout);
 }
 
+// The model's effective thinking switch for THIS request -- the SINGLE on/off the render and the parser
+// agree on. Precedence: a PER-REQUEST input's chat_template_kwargs enable_thinking (narrowest, wins -- a
+// per-request --input/stdin flips it over the global --enable-thinking flag), then the global
+// --enable-thinking flag, then NONE.  It reads enable_thinking directly (not the rendered prompt) to
+// sidestep the engine's own inject-default (the render alone always looks thinking-on for a Qwen model,
+// yet it may never actually reason). The name is not hard-coded per model: the flag and the per-request
+// kwargs both key on it.
+std::optional<bool> resolveEffectiveThinking(const ParsedRequest& pr,
+                                            const config::ModelRequestConfig& reqConfig) {
+  if (pr.hasKwargs && !pr.kwargsJson.empty()) {
+    std::optional<bool> per;
+    try {
+      auto kc = ov::genai::JsonContainer::from_json_string(pr.kwargsJson);
+      if (kc.contains("enable_thinking"))
+        per = kc["enable_thinking"].as_bool();
+    } catch (...) {}
+    if (per.has_value())
+      return per;
+  }
+  return reqConfig.enable_thinking;
+}
 // The core one-request driver shared by the one-shot and worker forms.
 // `inputJson` carries the conversation (a full chat, gen_config shape): for a
 // one-shot this is the acquiried input (the --input value when given, or -- when
@@ -664,6 +666,32 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
     pr = translateGenConfig(g);
   }
 
+  // The top-level --chat-template-kwargs flag (a global override for THIS run, parsed in
+  // config::ModelRequestConfig) must also force the (tools|kwargs) sub-rule ON here: otherwise
+  // the engine path -- which by construction renders with NO kwargs -- would be taken and the
+  // flag would never reach apply_chat_template, so an explicit chat_template_kwargs["enable_thinking"]
+  // bool could not override the reasoning gate (this is the path your --chat-template-kwargs took:
+  // pr.hasKwargs stayed false, the engine auto-detect ran, and the override was dead).  Fold it
+  // into pr only when the --input did not already carry its own chat_template_kwargs (an inline
+  // per-request object is more specific and wins); then its JSON becomes both the render's
+  // extra_context (so the template's else branch fires) and the override read below.
+  if (!pr.hasKwargs && reqConfig.chat_template_kwargs && !reqConfig.chat_template_kwargs->empty()) {
+    pr.hasKwargs = true;
+    pr.kwargsJson = *reqConfig.chat_template_kwargs;
+    rapidjson::Document kd;
+    if (!kd.Parse<0>(reqConfig.chat_template_kwargs->c_str()).HasParseError()) {
+      auto agp = kd.FindMember("add_generation_prompt");
+      if (agp != kd.MemberEnd() && agp->value.IsBool())
+        pr.addGenerationPrompt = agp->value.GetBool();
+    }
+  }
+
+  // The one on/off for the reasoning splitter, shared by BOTH branches below (so they can never
+  // disagree): a per-request chat_template_kwargs enable_thinking wins, then the --enable-thinking flag,
+  // then the model's own default (nullopt -> off).  It drives the render (pre-apply: projected onto
+  // extra_context) AND the parser (the dynamic reasoner's setActive) -- both from this one value.
+  const auto effThinking = resolveEffectiveThinking(pr, reqConfig);
+  const bool thinking = effThinking.has_value() ? *effThinking : false;
   bool useEngineTemplate = !(pr.hasTools || pr.hasKwargs);   // the (tools|kwargs) sub-rule
 
   if (!useEngineTemplate) {
@@ -678,33 +706,61 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
     std::optional<ov::genai::JsonContainer> tools = pr.hasTools
         ? std::optional<ov::genai::JsonContainer>(ov::genai::JsonContainer::from_json_string(pr.toolsJson))
         : std::nullopt;
-    std::optional<ov::genai::JsonContainer> extra = pr.hasKwargs
-        ? std::optional<ov::genai::JsonContainer>(ov::genai::JsonContainer::from_json_string(pr.kwargsJson))
-        : std::nullopt;
+    // Project the effective thinking switch onto the render (apply_chat_template's extra_context) so the
+    // engine's applied template matches the parser split: enable_thinking == thinking, the SAME effective
+    // value -- render + split can never disagree. Copy the per-request kwargs (if any) and set
+    // enable_thinking on them; this also removes the engine's own render-time inject-default from the
+    // pre-apply path (so a model that does not actually reason no longer gets the reasoning-on form).
+    rapidjson::Document ek;
+    if (pr.hasKwargs && !pr.kwargsJson.empty())
+      ek.Parse(pr.kwargsJson.c_str());
+    if (!ek.IsObject()) ek.SetObject();
+    auto& ekAlloc = ek.GetAllocator();
+    ek.RemoveMember("enable_thinking");
+    rapidjson::Value ekKey("enable_thinking", ekAlloc);
+    rapidjson::Value ekVal; ekVal.SetBool(thinking);
+    ek.AddMember(ekKey, ekVal, ekAlloc);
+    std::optional<ov::genai::JsonContainer> extra =
+      std::optional<ov::genai::JsonContainer>(
+        ov::genai::JsonContainer::from_json_string(config::compactJsonOf(ek)));
     std::string rendered = tokenizer.apply_chat_template(
         history, pr.addGenerationPrompt, std::string(), tools, extra);
-    // (b) Resolve the tool-call parser for THIS request: an explicit --tool-call-parser
-    // wins; else auto-detect from the model's OWN rendered template (the model-intrinsic
-    // sentinel); else none.  A selected-but-unwired name resolves to no parser and degrades
-    // to plain text; an auto-detected (or explicitly selected + wired) format is reported on
-    // stderr (never the wire stdout, so the protocol stays one-JSON-per-line).
+    // (b) Resolve the tool-call parser for THIS request: an explicit --tool-call-parser name wins;
+    // else auto-detect from the model's OWN rendered template (the model-intrinsic sentinel); else
+    // none.  A selected-but-unwired name degrades (composeParserList splices no tool parser for it)
+    // to reasoner-only / plain text; an auto-detected wired format is reported on stderr (never the
+    // wire stdout, so the protocol stays one-JSON-per-line).
     std::optional<std::string> detectedName;
     const auto parserName = ::ovgenai::toolcall::selectToolCallParserName(
         reqConfig.tool_call_parser, tokenizer, &detectedName);
-    std::vector<std::shared_ptr<ov::genai::IncrementalParser>> powers;
+    // The reasoning gate is now EXPLICIT, not the model's rendered template (a model can render a
+    // reasoning template yet not actually reason).  The gate is the effective thinking resolved once
+    // above (resolveEffectiveThinking): a per-request chat_template_kwargs enable_thinking wins over the
+    // --enable-thinking flag over the model's own default.  That same value is projected onto the render
+    // (above) and flips the parser below (setActive), so render + split agree.
+    // Report the tool-call selection on stderr: the explicit / auto-detected name, plus a note
+    // when a selected-but-unwired name degrades to reasoner-only / plain text.
     if (parserName.has_value() && !parserName->empty()) {
-      auto p = ::ovgenai::toolcall::makeToolCallParserByName(*parserName);
-      if (!p.empty()) {
-        powers = std::move(p);
-        std::fprintf(stderr, "ovgenai: vlm: using tool-call parser '%s'\n", parserName->c_str());
-      } else {
+      std::fprintf(stderr, "ovgenai: vlm: using tool-call parser '%s'\n", parserName->c_str());
+      if (::ovgenai::toolcall::makeToolCallParserByName(*parserName).empty())
         std::fprintf(stderr, "ovgenai: vlm: --tool-call-parser '%s' is advertised but not yet "
-                             "wired in the CLI; falling back to plain text (no tool_calls)\n",
+                             "wired in the CLI; degrading to plain text (no tool_calls)\n",
                      parserName->c_str());
-      }
     } else if (detectedName.has_value()) {
       std::fprintf(stderr, "ovgenai: vlm: auto-detected tool-call format '%s' from the model's "
                            "chat template\n", detectedName->c_str());
+    }
+    // The single DynamicReasoningIncrementalParser is ALWAYS first (composeParserList puts it at slot 0,
+    // the tool parser after) -- the one parser for both sides. The pipeline sets its on/off via setActive
+    // using the SAME effective thinking the render above used (render + split can never disagree), then the
+    // ContentStreamer runs over the list; the base TextParserStreamer fills content when the reasoner is
+    // inactive (a no-think model).
+    auto powers = ::ovgenai::toolcall::composeParserList(parserName, thinking);
+    if (!powers.empty()) {
+      auto dynReasoner = std::dynamic_pointer_cast<
+          ::ovgenai::toolcall::DynamicReasoningIncrementalParser>(powers.at(0));
+      if (dynReasoner)
+        dynReasoner->setActive(thinking);
     }
     std::string acc;
     auto streamer = makeContentStreamer(tokenizer, powers, acc);
@@ -741,11 +797,26 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
                               " pipe one on stdin, or type one at a terminal (a lone"
                               " '.' ends the input, as in the mail command)");
   ov::genai::ChatHistory history(ov::genai::JsonContainer::from_json_string(pr.normMessagesJson));
+  // The engine path is reached only when the user set NEITHER --enable-thinking nor chat_template_kwargs,
+  // so the thinking resolved once at the top is the model's own default (nullopt -> false): the dynamic
+  // reasoner is INACTIVE and the engine's own render stands -- a non-thinking model (the Qwen3.5-0.8B)
+  // just gets its content (the original good behaviour).  A real thinking model is opted in via the flag,
+  // which routes the request to the pre-apply branch.  No auto-detect from the render.
+  const auto powers = ::ovgenai::toolcall::composeParserList(std::nullopt, thinking);
+  if (!powers.empty()) {
+    auto dynReasoner = std::dynamic_pointer_cast<
+        ::ovgenai::toolcall::DynamicReasoningIncrementalParser>(powers.at(0));
+    if (dynReasoner)
+      dynReasoner->setActive(thinking);
+  }
+  std::fprintf(stderr, "ovgenai: vlm: reasoning splitter %s (%zu parser%s on the streamer)\n",
+               thinking ? "ON" : "OFF", powers.size(), powers.size() == 1 ? "" : "s");
   std::string acc;
-  auto streamer = makeAccumulatingStreamer(tokenizer, acc);
+  auto streamer = makeContentStreamer(tokenizer, powers, acc);
   auto res = pipe.generate(history, pr.images, pr.videos, pr.audios, {}, cfg,
                            ov::genai::StreamerVariant(streamer));
-  emitResult(isWorker, reqId, acc, res, reqConfig);
+  ::ovgenai::toolcall::bridgeParsedMessage(streamer, res);
+  emitResult(isWorker, reqId, acc, res, reqConfig, /*streamed=*/true);
   return 0;
 }
 

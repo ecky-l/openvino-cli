@@ -19,10 +19,12 @@ namespace toolcall {
 // so its decode() would fall back to the tokenizer's rt_info default (skip_special_tokens = true
 // for these fixtures) and STRIP a leading ‹/thinking› -- for the 0.8B that close-of-thinking IS
 // the whole lead-in before the ‹tool_call›, so the surfaced content would collapse to empty.
-// Setting skip_special_tokens = false here (the same idiom makeAccumulatingStreamer uses at
-// vlm.cpp:470) preserves that lead-in verbatim as-is -- i.e. reasoning flows through as normal
-// content (there is NO reasoning splitter); only the tool block is parsed out into the
-// tool_calls array by the carried parser.
+// Setting skip_special_tokens = false here keeps that 0.8B no-think lead-in verbatim (a plain
+// TextStreamer decodes a specials-preserving token stripped) instead of collapsing it to empty.
+// The carried parser routes the tool block out into the tool_calls array; a gated
+// ReasoningIncrementalParser on the list (composeParserList prepends it only when thinking is on)
+// would also split reasoning into a reasoning_content key, and the base fills the remaining
+// content either way.
 ContentStreamer::ContentStreamer(const ov::genai::Tokenizer& tok,
                                  std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers,
                                  std::string& acc)
@@ -66,13 +68,10 @@ void bridgeParsedMessage(const std::shared_ptr<ov::genai::StreamerBase>& streame
 const std::vector<ToolCallFormatSpec>& knownToolCallFormats() {
   static const std::vector<ToolCallFormatSpec> kSpecs = {
     { "qwen35", { kSentfunc, kSentry },
-      // Ordered parser list: the reasoning splitter FIRST (expect_open_tag=false -- the Qwen open-tag is
-      // pre-filled in the prompt; keep_original_content=false so reasoning is stripped out of content),
-      // then the model-specific tool parser (it adds the tool_calls key).
+      // Just this format's tool parser.  A reasoning splitter is NOT in here: a separate, gated
+      // ReasoningIncrementalParser is composed beside it by composeParserList and prepended only
+      // when the rendered template shows thinking is on.
       []() { return std::vector<std::shared_ptr<ov::genai::IncrementalParser>>{
-        std::static_pointer_cast<ov::genai::IncrementalParser>(
-            std::make_shared<ov::genai::ReasoningIncrementalParser>(
-                /*expect_open_tag=*/false, /*keep_original_content=*/false)),
         std::static_pointer_cast<ov::genai::IncrementalParser>(
             std::make_shared<Qwen35ToolCallParser>()),
       }; } },
@@ -162,6 +161,30 @@ std::optional<std::string> matchFormat(const std::string& rendered) {
   return std::nullopt;
 }
 
+// One DYNAMIC reasoner, always at slot 0 (the user's one-parser both-sides design). Reasoning is a
+// runtime TOGGLE on it (setActive), not a compose-time decision: a model may render a reasoning
+// template yet not actually reason, so render-based auto-detect is not trustworthy.
+std::shared_ptr<DynamicReasoningIncrementalParser> makeDynamicReasoningParser() {
+  return std::make_shared<DynamicReasoningIncrementalParser>(
+      /*expect_open_tag=*/false, /*keep_original_content=*/false,
+      kThinkingOpen, kThinkingClose);
+}
+std::shared_ptr<ov::genai::IncrementalParser> makeReasoningParser() {
+  return std::static_pointer_cast<ov::genai::IncrementalParser>(makeDynamicReasoningParser());
+}
+std::vector<std::shared_ptr<ov::genai::IncrementalParser>>
+    composeParserList(const std::optional<std::string>& name, bool reasoner_active) {
+  auto dyn = makeDynamicReasoningParser();
+  if (reasoner_active)
+    dyn->setActive(true);
+  std::vector<std::shared_ptr<ov::genai::IncrementalParser>> powers;
+  powers.push_back(std::static_pointer_cast<ov::genai::IncrementalParser>(dyn));
+  if (name && !name->empty()) {
+    const auto tool = makeToolCallParserByName(*name);
+    powers.insert(powers.end(), tool.begin(), tool.end());
+  }
+  return powers;
+}
 // selectToolCallParserName -- selection precedence: an explicit --tool-call-parser name
 // (override) wins; else auto-detect from the model's OWN loaded template; else no parser
 // (graceful: no stop, finish_reason stays stop, no tool_calls -- today's behaviour).

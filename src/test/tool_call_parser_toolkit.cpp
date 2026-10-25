@@ -204,20 +204,51 @@ TEST(ToolCallSupport, ResetClearsPerTurnState) {
 TEST(ToolCallSupport, RegistryAdvertisesAllAndWiresQwenOnly) {
   EXPECT_EQ(advertisedToolCallParsers(),
             (std::vector<std::string>{"qwen35", "hermes", "gemma4", "museglimmer"}));
-  // qwen35 is wired -> a non-empty parser list of two, ORDERED: the reasoning splitter (it moves the
-  // reasoning into reasoning_content and clears it from content) first, then the model-specific
-  // Qwen35ToolCallParser (it adds the tool_calls key).  The earlier single-parser shape is gone.
+  // qwen35 is wired -> its registry make returns JUST the Qwen35ToolCallParser (the tool parser);
+  // a reasoning splitter is NOT in the registry anymore -- it is composed separately
+  // (composeParserList, gated on the rendered template) and prepended only when thinking is on, so
+  // the registry stays a model-agnostic tool-format list.  The earlier two-entry (reasoner + tool)
+  // shape is gone.
   auto qwen = makeToolCallParserByName("qwen35");
   ASSERT_FALSE(qwen.empty()) << "qwen35 must be wired -> a non-empty parser list";
-  ASSERT_EQ(qwen.size(), std::size_t{2});
-  EXPECT_NE(dynamic_cast<ov::genai::ReasoningIncrementalParser*>(qwen[0].get()), nullptr)
-    << "list[0] must be the ReasoningIncrementalParser (the reasoning splitter)";
-  EXPECT_NE(dynamic_cast<Qwen35ToolCallParser*>(qwen[1].get()), nullptr)
-    << "list[1] must be the Qwen35ToolCallParser (the tool parser)";
+  ASSERT_EQ(qwen.size(), std::size_t{1});
+  EXPECT_NE(dynamic_cast<Qwen35ToolCallParser*>(qwen[0].get()), nullptr)
+    << "the list must be just the Qwen35ToolCallParser (the reasoner is composed separately)";
   EXPECT_TRUE(makeToolCallParserByName("hermes").empty());   // advertised, not wired
   EXPECT_TRUE(makeToolCallParserByName("nope").empty());
 }
 
+// The reasoner at RUNTIME (always in the list; toggled by setActive) -- model-free. INACTIVE: a
+// reasoning-tagged chunk passes through verbatim (raw tags stay in content; no reasoning_content key).
+// ACTIVE: the engine splits the span into reasoning_content and returns the part after the close.
+TEST(ToolCallSupport, ReasonerToggleActiveInactive) {
+  auto dyn = makeDynamicReasoningParser();
+  ASSERT_NE(dyn, nullptr);
+  ASSERT_FALSE(dyn->isActive());
+  dyn->setActive(false);
+  {
+    ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
+    std::string t = kThinkingOpen + "plain reasoning text" + kThinkingClose + " final";
+    ASSERT_FALSE(t.empty());
+    const std::string out = dyn->parse(dm, t, std::vector<int64_t>{});
+    EXPECT_FALSE(dm.contains("reasoning_content"))
+      << "inactive reasoning must NOT write a reasoning_content key";
+    EXPECT_EQ(out, t);
+    EXPECT_FALSE(out.find(kThinkingOpen) == std::string::npos);
+  }
+  dyn->setActive(true);
+  ASSERT_TRUE(dyn->isActive());
+  {
+    ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
+    std::string t = kThinkingOpen + "reason here" + kThinkingClose + " the answer";
+    const std::string out = dyn->parse(dm, t, std::vector<int64_t>{});
+    ASSERT_TRUE(dm.contains("reasoning_content")) << "active reasoning must split it out";
+    std::string rc = dm["reasoning_content"].as_string().value_or(std::string());
+    EXPECT_NE(rc.find("reason here"), std::string::npos)
+      << "active: reasoning must split the inner text into reasoning_content (whitespace-tolerant; the upstream base parser may add a benign leading space from a literal open tag)";
+    EXPECT_EQ(out, " the answer");
+  }
+}
 // D1/D5 -- the model-free core of the auto-detect gate: the model-intrinsic sentinels
 // (example_function_name / example_parameter) that Qwen's template renders drive detection; a
 // template with neither matches nothing (graceful); the sentinels are AND-ed so naming only ONE

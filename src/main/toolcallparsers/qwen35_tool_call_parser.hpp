@@ -2,12 +2,13 @@
 // (../OpenArc/src/engine/ov_genai/tool_parse/qwen35.py): a TOKEN-ID-driven state machine.
 // The carrier is ContentStreamer (tool_call_support.cpp) = the OpenArc Qwen35ToolCallStreamer analog.
 //
-// NO reasoning splitter: per the project's direction, reasoning output goes to the normal
-// output (content) exactly as before -- ONLY the tool block is parsed out into the tool_calls
-// array.  The close-of-thinking lead-in merely flows through as content (the carrier decodes
-// with skip_special_tokens=false).  The parser still keeps a full state machine and COLLECTS
-// the tool-call fragments (the function name + the argument values, accumulated across whatever
-// deltas) plus the other content, then EMITs the consolidated tool_calls array.
+// This parser is REASONING-BLIND: it only collects the tool block into the tool_calls array --
+// it does NOT split reasoning out.  A SEPARATE, gated ReasoningIncrementalParser (prepended by
+// tool_call_support's composeParserList only when thinking is on) writes reasoning_content; when
+// reasoning is OFF the base TextParserStreamer just fills the content key, so the close-of-thinking
+// lead-in (the carrier decodes with skip_special_tokens=false) flows through as content instead.
+// The parser still keeps a full state machine and COLLECTS the tool-call fragments (the function
+// name + the argument values, accumulated across whatever deltas), then EMITs the tool_calls array.
 //
 // Model shape: an outer call-open ... call-close frame, an inner function-open=NAME ...
 // function-close pair, and per argument a parameter-open=P ... parameter-close triple.  The

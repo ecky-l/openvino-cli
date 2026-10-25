@@ -15,8 +15,8 @@
 // get_weather(call for city=London) call in the {function.name, arguments<json string>} shape,
 // (b) the engine's non-empty-tool_calls rule reports a uniform finish_reason "tool_calls", and
 // (c) the surfaced content carries no raw Qwen35 tag literals and no leaked close-of-thinking
-// -- the parser routes the whole call block out; reasoning keeps flowing through as content
-// (there is NO reasoning splitter).  Run it with ctest -V to read one [obs <model>] line
+// -- the parser routes the whole call block out (and, for a thinking turn, a separate gated reasoner
+// moves reasoning into reasoning_content).  Run it with ctest -V to read one [obs <model>] line
 // per model of what the engine actually surfaced (so the run records the real outcome).
 //
 // Builds/runs only when both the Qwen3.5 tokenizer fixture and the captured-outputs file are
@@ -208,16 +208,25 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
   // (the project guardrail): every tag literal is swapped for the inert U+2039 / U+203A marker and
   // newlines flattened, so the [obs] line is safe to print verbatim.
   auto redact = [&](std::string s) {
-    const std::vector<std::string> tags =
-      { kTCOpen, kTCClose, kFuncOpen, kFuncClose, kParamOpen, kParamClose, LT + "/thinking" + GT };
+
     const std::string ph = "\u2039\u203A";
-    for (const std::string& tag : tags) {
-      if (tag.empty())
-        continue;
-      std::size_t p;
-      while ((p = s.find(tag)) != std::string::npos)
-        s.replace(p, tag.size(), ph);
-    }
+    // Scrub EVERY tag-shaped span so a printed [obs] line can leak no raw tag (the guardrail):
+    // one pass over the angle-bracket spans (open-byte to the next close-byte -- the think /
+    // /thinking / tool_call / function / parameter tags), and one over pipe-delimited sentinels
+    // (the eos sentinel that has no angle byte at all); each run -> the inert placeholder pair `ph`.
+    auto scrub = [&](std::string& t, const std::string& open, const std::string& close) {
+      std::size_t from = 0;
+      while (true) {
+        std::size_t o = t.find(open, from);
+        if (o == std::string::npos) break;
+        std::size_t c = t.find(close, o + open.size());
+        if (c == std::string::npos) { t.replace(o, open.size(), ph); break; }
+        t.replace(o, (c + close.size()) - o, ph);
+        from = o + ph.size();
+      }
+    };
+    scrub(s, LT, GT);                 // every angle-bracket tag span
+    scrub(s, "|", "|");              // every pipe-delimited sentinel span
     std::size_t q;
     while ((q = s.find('\n')) != std::string::npos)
       s.replace(q, 1, "\\n");
@@ -239,9 +248,15 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
     std::vector<int64_t> emitted(ids, ids + enc.input_ids.get_size());
     ASSERT_FALSE(emitted.empty());
     // (3) the REAL parser run the way the engine runs it: a ContentStreamer carrying it and
-    //     accumulating surfaced content into `acc`; the engine-facing variant = shared_ptr<StreamerBase>.
-    auto qparser = makeToolCallParserByName("qwen35");   // the [reasoner, tool-parser] list
-    ASSERT_FALSE(qparser.empty());
+    //     accumulating surfaced content into `acc`; the engine-facing carrier is its TextParserStreamer base.
+    // The reasoning gate, per section: a close-of-thinking present in the captured OUTPUT means a
+    // thinking turn (the model opened the think tag AND then closed it) -> wire the reasoner; no
+    // close (the 0.8B goes straight to the tool-call block and never closes) means thinking is off
+    // -> omit the reasoner so the base streamer fills content.  Compose the list for this section
+    // (reasoner + tool when thinking; just the tool, or [] when neither -- qwen35 is always tool-wired).
+    const bool reasoning = sec.result.find(kThinkingClose) != std::string::npos;
+    auto qparser = ::ovgenai::toolcall::composeParserList(std::optional<std::string>("qwen35"), reasoning);
+    ASSERT_FALSE(qparser.empty());   // qwen35 is wired -> at least the tool parser (plus a reasoner when thinking)
     std::string acc;
     auto streamer = std::make_shared<ContentStreamer>(tok, qparser, acc);
     auto base = std::static_pointer_cast<ov::genai::StreamerBase>(streamer);
@@ -326,6 +341,18 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
       EXPECT_EQ(bridgedRes.parsed[0]["tool_calls"][0]["function"]["name"].as_string().value_or(std::string()),
                 std::string("get_weather"));
     }
+    // (e) the reasoning gate's effect on THIS turn: a thinking turn (a close-of-thinking in its
+    //     output) must carry a non-empty reasoning_content (the wired reasoner moved it there); a
+    //     no-think turn (the 0.8B) must have NO reasoning_content key -- it omitted the reasoner and
+    //     the base filled content only.  This is the 130/131 -> 131/131 flip and the point of it.
+    std::string rc;
+    if (msg.is_object() && msg.contains("reasoning_content"))
+      rc = msg["reasoning_content"].as_string().value_or(std::string());
+    const std::size_t rc_len = rc.size();
+    if (reasoning)
+      EXPECT_FALSE(rc.empty())          << (sec.label + ": a thinking turn must carry reasoning_content");
+    else
+      EXPECT_FALSE(msg.contains("reasoning_content")) << (sec.label + ": a no-think turn must NOT carry reasoning_content");
     // OBSERVE (Point 2): the real per-model outcome -- a ctest -V run records what the engine
     // actually surfaced (not only each check's pass/fail); a discrepancy is what we chase next.
     const std::string tcName =
@@ -341,6 +368,7 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
     std::cout << std::endl << "  [obs " << sec.label << "] acc_bytes=" << acc.size()
               << " tool_calls=" << (msg.contains("tool_calls") ? msg["tool_calls"].size() : 0)
               << " name=" << tcName << " city=" << tcCity
+              << " reasoning=" << (reasoning ? "TRUE" : "FALSE") << " reasoning_bytes=" << rc_len
               << " hasToolCalls=" << (hasToolCalls ? "true" : "false")
               << " leaked[thinkClose,tool_call,function,parameter]="
               << (acc.find(thinkClose)  != std::string::npos ? "Y" : "n")

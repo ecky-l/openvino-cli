@@ -52,6 +52,27 @@ double parseDouble(const std::string& s, const char* flag) {
 // Absent or null → leave the field at its struct default (non-optional) or at
 // nullopt (optional). A present non-number / negative int / wrong type is an error.
 
+// Parse a boolean keyword from the CLI; only true/false (case-insensitive) are accepted (so a typo
+// is a ConfigError rather than a silent mis-toggle of the reasoning switch).
+bool parseBool(const std::string& s, const char* flag) {
+  std::string v = s;
+  for (auto& c : v)
+    if (c >= 'A' && c <= 'Z')
+      c = static_cast<char>(c - 'A' + 'a');
+  if (v == "true")  return true;
+  if (v == "false") return false;
+  throw ConfigError(std::string("invalid boolean for ") + flag + ": " + s + " (use true or false)");
+}
+
+// Read one optional bool from a JSON object (absent or null -> nullopt; wrong type -> ConfigError).
+void readOptBool(rapidjson::Document& doc, const char* key,
+                  std::optional<bool>& out, const char* path) {
+  auto it = doc.FindMember(key);
+  if (it == doc.MemberEnd() || it->value.IsNull()) return;
+  if (!it->value.IsBool())
+    throw ConfigError(std::string(path) + ": expected a boolean");
+  out = it->value.GetBool();
+}
 // Read one optional int from a JSON object (absent or null → nullopt; negative
 // integer or non-integer type → ConfigError).
 void readOptInt(rapidjson::Document& doc, const char* key,
@@ -123,6 +144,11 @@ po::options_description ModelRequestConfig::requestOptionsDesc() {
     ("chat-template-kwargs", po::value<std::string>(),
         "Chat-template kwargs as a JSON object passed to the tokenizer's apply_chat_template, "
         "e.g. {\"add_generation_prompt\": true}.")
+    ("enable-thinking", po::value<std::string>(),
+        "The vlm reasoning (thinking) switch: takes true or false (omit for the model's own default). "
+        "true enables the reasoner and sets enable_thinking=true in the applied chat template; false "
+        "disables the reasoner.  A per-request chat_template_kwargs enable_thinking (e.g. over the "
+        "worker stdin) OVERRIDES this flag for that request.  Only meaningful for vlm.")
     ("frequency-penalty", po::value<std::string>(),
         "Penalty proportional to how often a token has already appeared in the output; "
         "0 = no penalty, higher = penalise frequently-repeated tokens by their frequency.")
@@ -220,6 +246,9 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
     cfg.chat_template_kwargs = std::string(requireJsonObject(
         vm["chat-template-kwargs"].as<std::string>(),
         "--chat-template-kwargs"));
+  if (vm.count("enable-thinking")) {
+    cfg.enable_thinking = parseBool(vm["enable-thinking"].as<std::string>(), "--enable-thinking");
+  }
   if (vm.count("frequency-penalty"))
     cfg.frequency_penalty = parseDouble(vm["frequency-penalty"].as<std::string>(),
                                         "--frequency-penalty");
@@ -283,6 +312,7 @@ ModelRequestConfig modelRequestConfigFromJson(const std::string& json) {
       cfg.chat_template_kwargs = std::string(compactJsonOf(it->value));
     }
   }
+  readOptBool(doc, "enable_thinking", cfg.enable_thinking, "runtime_config.enable_thinking");
   readOptDouble(doc, "frequency_penalty", cfg.frequency_penalty, "runtime_config.frequency_penalty");
   readDefaultSize(doc,   "max_tokens",    cfg.max_tokens,        "runtime_config.max_tokens");
   readOptInt(doc,    "num_assistant_tokens",  cfg.num_assistant_tokens,   "runtime_config.num_assistant_tokens");
@@ -314,6 +344,11 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
     rapidjson::Value val(v.c_str(), v.size(), a);
     out.AddMember(k, val, a);
   };
+  auto addBool   = [&](const char* key, bool v) {
+    rapidjson::Value k(key, a);
+    rapidjson::Value val; val.SetBool(v);
+    out.AddMember(k, val, a);
+  };
   // Emit fields in alphabetical order.  The non-optional fields (max_tokens /
   // temperature / top_k / top_p / repetition_penalty) carry a real default, so
   // they are always emitted; an optional key is omitted entirely (no "null"
@@ -328,6 +363,7 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
     else node.SetObject();
     out.AddMember(rapidjson::Value("chat_template_kwargs", a), std::move(node), a);
   }
+  if (c.enable_thinking.has_value()) addBool("enable_thinking", *c.enable_thinking);
   if (c.frequency_penalty.has_value()) addDouble("frequency_penalty", *c.frequency_penalty);
   addInt("max_tokens",         c.max_tokens);
   if (c.num_assistant_tokens.has_value()) addInt("num_assistant_tokens", *c.num_assistant_tokens);

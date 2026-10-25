@@ -31,7 +31,8 @@ struct ModelRequestConfig {
   // the omits them;  the other seven are std::optional (nullopt == "not in this
   // request").  The comment to the right of each is the knob it is.
   std::optional<double>      assistant_confidence_threshold;   // a drafted token is accepted only when the main model's probability for it is at least this; lower = accept more drafts (faster, riskier). Per-request default; the protocol may override
-  std::optional<std::string> chat_template_kwargs;            // chat-template kwargs as a JSON object passed to apply_chat_template, e.g. {"add_generation_prompt": true}
+  std::optional<std::string> chat_template_kwargs;            // chat-template kwargs as a JSON object passed to apply_chat_template, e.g. {"add_generation_prompt": true}; an "enable_thinking" bool there ALSO overrides the vlm reasoning-splitter gate (wire/omit a ReasoningIncrementalParser)
+  std::optional<bool>          enable_thinking;              // the vlm reasoning switch (tri-state: absent = the model's own default; true/false enable/disable). Drives BOTH the parser active state (setActive on the always-present DynamicReasoningIncrementalParser) and the render; a per-request chat_template_kwargs enable_thinking wins over it
   std::optional<double>      frequency_penalty;              // penalty by how often a token has already appeared (0 = off; higher penalises frequent repeats)
   std::size_t                max_tokens               = 16384;  // max number of new tokens to generate before stopping (non-optional; struct default when omitted)
   std::optional<std::size_t> num_assistant_tokens;            // draft ('assistant') tokens produced per speculative-decoding step before verification against the main model; used with --assistant-confidence-threshold. Per-request default; the protocol may override
