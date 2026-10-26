@@ -26,7 +26,7 @@
 #include <gtest/gtest.h>
 
 #include <openvino/genai/tokenizer.hpp>   // Tokenizer + apply_chat_template (the public detect API)
-#include "tool_call_support.hpp"          // ovgenai::toolcall::detectModelFamily
+#include "streaming_support.hpp"          // ovgenai::toolcall::detectModelFamily
 
 #if defined(OVGENAI_VLM_FIXTURE)
 

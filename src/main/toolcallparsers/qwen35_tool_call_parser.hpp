@@ -1,10 +1,10 @@
 // Qwen3.5 tool-call parser -- a faithful C++ port of OpenArc QwenXMLToolParser
 // (../OpenArc/src/engine/ov_genai/tool_parse/qwen35.py): a TOKEN-ID-driven state machine.
-// The carrier is ContentStreamer (tool_call_support.cpp) = the OpenArc Qwen35ToolCallStreamer analog.
+// The carrier is ContentStreamer (streaming_support.cpp) = the OpenArc Qwen35ToolCallStreamer analog.
 //
 // This parser is REASONING-BLIND: it only collects the tool block into the tool_calls array --
 // it does NOT split reasoning out.  A SEPARATE, gated ReasoningIncrementalParser (prepended by
-// tool_call_support's composeParserList only when thinking is on) writes reasoning_content; when
+// streaming_support's instance() only when thinking is on) writes reasoning_content; when
 // reasoning is OFF the base TextParserStreamer just fills the content key, so the close-of-thinking
 // lead-in (the carrier decodes with skip_special_tokens=false) flows through as content instead.
 // The parser still keeps a full state machine and COLLECTS the tool-call fragments (the function

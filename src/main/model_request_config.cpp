@@ -13,7 +13,7 @@
 #include "model_load_config.hpp"       // the load section, spliced into our parse
 #include "model_runtime_config.hpp"    // the runtime section, spliced into our parse
 #include "model_scheduler_config.hpp"  // the scheduler section, spliced into our parse
-#include "tool_call_support.hpp"        // advertisedModelFamilies() -- one source of truth for accepted --model-family names
+#include "streaming_support.hpp"        // advertisedModelFamilies() -- one source of truth for accepted --model-family names
 
 #include <algorithm>
 #include <sstream>

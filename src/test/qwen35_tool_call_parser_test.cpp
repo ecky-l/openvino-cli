@@ -46,7 +46,7 @@
 #include <openvino/genai/visual_language/pipeline.hpp>  // VLMPipelineBase / VLMDecodedResults / VideoMetadata
 #include <openvino/genai/tokenizer.hpp>              // Tokenizer + TokenizedInputs + AnyMap
 
-#include "tool_call_support.hpp"                    // ContentStreamer + makeToolCallParserByName + the k*+LT+GT consts
+#include "streaming_support.hpp"                    // ContentStreamer + makeToolCallParserByName + the k*+LT+GT consts
 
 // ---------------------------------------------------------------------------
 // Reading the captured outputs (file-scope helpers; [[maybe_unused]] so an under-
@@ -254,11 +254,10 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
     // close (the 0.8B goes straight to the tool-call block and never closes) means thinking is off
     // -> omit the reasoner so the base streamer fills content.  Compose the list for this section
     // (reasoner + tool when thinking; just the tool, or [] when neither -- qwen35 is always tool-wired).
+    const std::string kThinkingClose = LT + "/think" + GT;
     const bool reasoning = sec.result.find(kThinkingClose) != std::string::npos;
-    auto qparser = ::ovgenai::toolcall::composeParserList(std::optional<std::string>("qwen35"), reasoning);
-    ASSERT_FALSE(qparser.empty());   // qwen35 is wired -> at least the tool parser (plus a reasoner when thinking)
     std::string acc;
-    auto streamer = std::make_shared<ContentStreamer>(tok, qparser, acc);
+    auto streamer = ::ovgenai::toolcall::ContentStreamer::instance(tok, "qwen35", reasoning, acc);
     auto base = std::static_pointer_cast<ov::genai::StreamerBase>(streamer);
     ov::genai::StreamerVariant sv = base;
     // (4) the gmock model EMITS the tokens one-at-a-time then flushes -- the engine's exact path, so

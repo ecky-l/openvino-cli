@@ -17,7 +17,7 @@
 // name under "function" and the city by re-parsing that arguments string.
 #include <gtest/gtest.h>
 
-#include "tool_call_support.hpp"                // ContentStreamer + the qwen35 header (parser + synth + consts)
+#include "streaming_support.hpp"                // ContentStreamer + the qwen35 header (parser + synth + consts)
 #include <openvino/genai/json_container.hpp>
 #include <openvino/genai/llm_pipeline.hpp>        // DecodedResults (the engine-side result the bridge fills)
 #include <cstddef>
@@ -222,25 +222,33 @@ TEST(ToolCallSupport, RegistryAdvertisesAllAndWiresQwenOnly) {
 // reasoning-tagged chunk passes through verbatim (raw tags stay in content; no reasoning_content key).
 // ACTIVE: the engine splits the span into reasoning_content and returns the part after the close.
 TEST(ToolCallSupport, ReasonerToggleActiveInactive) {
-  auto dyn = makeDynamicReasoningParser();
+  const std::string kOpen  = LT + "think" + GT;
+  const std::string kClose = LT + "/think" + GT;
+  auto dyn = std::make_shared<DynamicReasoningIncrementalParser>(false, false, kOpen, kClose);
+  ov::genai::Tokenizer tok;
+  std::vector<std::shared_ptr<ov::genai::IncrementalParser>> list{
+    std::static_pointer_cast<ov::genai::IncrementalParser>(dyn)};
+  std::string acc;
+  auto carrier = std::make_shared<ContentStreamer>(tok, std::move(list), acc, dyn);
+
   ASSERT_NE(dyn, nullptr);
   ASSERT_FALSE(dyn->isActive());
-  dyn->setActive(false);
+  carrier->activateEnableThinking(false);
   {
     ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
-    std::string t = kThinkingOpen + "plain reasoning text" + kThinkingClose + " final";
+    std::string t = kOpen + "plain reasoning text" + kClose + " final";
     ASSERT_FALSE(t.empty());
     const std::string out = dyn->parse(dm, t, std::vector<int64_t>{});
     EXPECT_FALSE(dm.contains("reasoning_content"))
       << "inactive reasoning must NOT write a reasoning_content key";
     EXPECT_EQ(out, t);
-    EXPECT_FALSE(out.find(kThinkingOpen) == std::string::npos);
+    EXPECT_FALSE(out.find(kOpen) == std::string::npos);
   }
-  dyn->setActive(true);
+  carrier->activateEnableThinking(true);
   ASSERT_TRUE(dyn->isActive());
   {
     ov::genai::JsonContainer dm = ov::genai::JsonContainer::object();
-    std::string t = kThinkingOpen + "reason here" + kThinkingClose + " the answer";
+    std::string t = kOpen + "reason here" + kClose + " the answer";
     const std::string out = dyn->parse(dm, t, std::vector<int64_t>{});
     ASSERT_TRUE(dm.contains("reasoning_content")) << "active reasoning must split it out";
     std::string rc = dm["reasoning_content"].as_string().value_or(std::string());
