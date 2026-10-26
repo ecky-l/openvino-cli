@@ -6,7 +6,7 @@
 // template ships none of the sentinels resolves to no parser and degrades to plain text.
 //
 // The no-model unit test (tool_call_parser_toolkit.cpp) already covers the matcher core
-// (matchFormat); this covers the render-and-detect path (detectToolCallFormat) against a
+// (matchFormat); this covers the render-and-detect path (detectModelFamily) against a
 // real Qwen3.5 fixture.  It only ASSERTS when the fixture's rendered template carries the
 // sentinel; an under-provisioned box (no runtime, or a degenerate template lacking the
 // sentinel) SKIPS, never fails.
@@ -26,7 +26,7 @@
 #include <gtest/gtest.h>
 
 #include <openvino/genai/tokenizer.hpp>   // Tokenizer + apply_chat_template (the public detect API)
-#include "tool_call_support.hpp"          // ovgenai::toolcall::detectToolCallFormat
+#include "tool_call_support.hpp"          // ovgenai::toolcall::detectModelFamily
 
 #if defined(OVGENAI_VLM_FIXTURE)
 
@@ -38,7 +38,7 @@ TEST(vlm_tool_call, qwen35DetectsFromLoadedTemplate) {
     GTEST_SKIP() << "baked VLM fixture dir is gone at runtime";
     return;
   }
-  // Build the tokenizer and let detectToolCallFormat render the model's OWN template
+  // Build the tokenizer and let detectModelFamily render the model's OWN template
   // with a probe tool (so the format instruction materialises) and match the sentinels.
   // A default-constructed Tokenizer is always valid, so if loading throws we still have a
   // usable object and simply skip -- we cannot assert a choice that was never derivable.
@@ -51,7 +51,7 @@ TEST(vlm_tool_call, qwen35DetectsFromLoadedTemplate) {
                    "$(./setupenv.sh)`)";
     return;
   }
-  auto detected = ovgenai::toolcall::detectToolCallFormat(tok);
+  auto detected = ovgenai::toolcall::detectModelFamily(tok);
   if (!detected.has_value()) {
     GTEST_SKIP() << "the fixture's rendered chat template did not carry the qwen35 sentinel "
                    "(example_function_name / example_parameter); nothing to auto-select (skip)";

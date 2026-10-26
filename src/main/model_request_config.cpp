@@ -13,7 +13,7 @@
 #include "model_load_config.hpp"       // the load section, spliced into our parse
 #include "model_runtime_config.hpp"    // the runtime section, spliced into our parse
 #include "model_scheduler_config.hpp"  // the scheduler section, spliced into our parse
-#include "tool_call_support.hpp"        // advertisedToolCallParsers() -- one source of truth for accepted --tool-call-parser names
+#include "tool_call_support.hpp"        // advertisedModelFamilies() -- one source of truth for accepted --model-family names
 
 #include <algorithm>
 #include <sstream>
@@ -30,8 +30,8 @@ namespace ovgenai {
 namespace config {
 namespace {
 
-// The accepted --tool-call-parser names are NOT a local list: they come from the tool-call
-// registry (ovgenai::toolcall::advertisedToolCallParsers() -- one source of truth for both this
+// The accepted --model-family names are NOT a local list: they come from the model-family
+// registry (ovgenai::toolcall::advertisedModelFamilies() -- one source of truth for both this
 // CLI-flag validation and the parser actually used at run time in vlm.cpp).  An advertised-but-
 // unwired name is still accepted here and simply resolves to no parser at run time, degrading
 // gracefully to plain text.
@@ -169,11 +169,11 @@ po::options_description ModelRequestConfig::requestOptionsDesc() {
     ("temperature", po::value<std::string>(),
         "Sampling temperature as a float > 0 -- higher = more random/uniform, lower = more "
         "deterministic; 0 or negative = greedy (deterministic) decoding. Default 1.0.")
-    // Help mirrors the registry (advertisedToolCallParsers()); boost's desc arg is a const
+    // Help mirrors the registry (advertisedModelFamilies()); boost's desc arg is a const
     // char*, so the *validated* set comes from the registry and this is a literal kept in sync.
-    ("tool-call-parser", po::value<std::string>(),
-        "Tool-call (function-calling) output format/parser for the generation output: "
-        "qwen35 / hermes / gemma4 / museglimmer (no short: --tool-* prefix-conflicts the other 't' flags).")
+    ("model-family", po::value<std::string>(),
+        "Model family (the reasoning / tool-call output format this model declares): "
+        "qwen35 / hermes / gemma4 / museglimmer (no short: a --model-* short form would prefix-conflict --max-tokens).")
     ("top-k", po::value<std::string>(),
         "Top-k sampling: only the k highest-probability tokens are considered; 0 disables "
         "top-k (considers all). Default 50 -- so a value is required to turn it off.")
@@ -270,9 +270,9 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
         parseSize(vm["seed"].as<std::string>(), "--seed"));
   if (vm.count("temperature"))
     cfg.temperature = parseDouble(vm["temperature"].as<std::string>(), "--temperature");
-  if (vm.count("tool-call-parser")) {
-    const std::string v = vm["tool-call-parser"].as<std::string>();
-    if (!v.empty()) cfg.tool_call_parser = v;
+  if (vm.count("model-family")) {
+    const std::string v = vm["model-family"].as<std::string>();
+    if (!v.empty()) cfg.model_family = v;
   }
   if (vm.count("top-k"))
     cfg.top_k = static_cast<std::size_t>(
@@ -281,10 +281,10 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
     cfg.top_p = parseDouble(vm["top-p"].as<std::string>(), "--top-p");
 
   const std::vector<std::string> allowedParsers =
-      ::ovgenai::toolcall::advertisedToolCallParsers();
-  if (cfg.tool_call_parser.has_value() && !cfg.tool_call_parser->empty() &&
-      !inSet(*cfg.tool_call_parser, allowedParsers))
-    throw ConfigError("--tool-call-parser '" + *cfg.tool_call_parser +
+      ::ovgenai::toolcall::advertisedModelFamilies();
+  if (cfg.model_family.has_value() && !cfg.model_family->empty() &&
+      !inSet(*cfg.model_family, allowedParsers))
+    throw ConfigError("--model-family '" + *cfg.model_family +
                       "' must be one of: " + joinList(allowedParsers, ", "));
   return cfg;
 }
@@ -320,7 +320,7 @@ ModelRequestConfig modelRequestConfigFromJson(const std::string& json) {
   readDefaultDouble(doc, "repetition_penalty", cfg.repetition_penalty, "runtime_config.repetition_penalty");
   readOptInt(doc,    "seed",              cfg.seed,               "runtime_config.seed");
   readDefaultDouble(doc, "temperature",   cfg.temperature,        "runtime_config.temperature");
-  readOptStr(doc,    "tool_call_parser",  cfg.tool_call_parser,   "runtime_config.tool_call_parser");
+  readOptStr(doc,    "model_family",  cfg.model_family,   "runtime_config.model_family");
   readDefaultSize(doc,   "top_k",         cfg.top_k,              "runtime_config.top_k");
   readDefaultDouble(doc, "top_p",         cfg.top_p,              "runtime_config.top_p");
   return cfg;
@@ -371,8 +371,8 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
   addDouble("repetition_penalty", c.repetition_penalty);
   if (c.seed.has_value()) addInt("seed", *c.seed);
   addDouble("temperature",     c.temperature);
-  if (c.tool_call_parser && !c.tool_call_parser->empty())
-    addStr("tool_call_parser", *c.tool_call_parser);
+  if (c.model_family && !c.model_family->empty())
+    addStr("model_family", *c.model_family);
   addInt("top_k",             c.top_k);
   addDouble("top_p",           c.top_p);
 

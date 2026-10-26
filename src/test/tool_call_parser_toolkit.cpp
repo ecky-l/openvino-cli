@@ -202,7 +202,7 @@ TEST(ToolCallSupport, ResetClearsPerTurnState) {
 // D3: one registry = one source of truth.  qwen35 is the only wired format; the rest are
 // advertised-but-unwired (resolve to null -> graceful: no parser, no stop, finish_reason stop).
 TEST(ToolCallSupport, RegistryAdvertisesAllAndWiresQwenOnly) {
-  EXPECT_EQ(advertisedToolCallParsers(),
+  EXPECT_EQ(advertisedModelFamilies(),
             (std::vector<std::string>{"qwen35", "hermes", "gemma4", "museglimmer"}));
   // qwen35 is wired -> its registry make returns JUST the Qwen35ToolCallParser (the tool parser);
   // a reasoning splitter is NOT in the registry anymore -- it is composed separately
@@ -264,11 +264,11 @@ TEST(ToolCallSupport, MatchFormatIsModelFree) {
   EXPECT_FALSE(matchFormat("it references " + kSentfunc + " only").has_value());
 }
 
-// The selection precedence: an explicit --tool-call-parser <name> override wins without
+// The selection precedence: an explicit --model-family <name> override wins without
 // auto-detect, so a default (empty) Tokenizer is a safe stand-in for the model-free half.
 TEST(ToolCallSupport, SelectOverrideWinsWithoutModel) {
   ov::genai::Tokenizer tok;
-  auto got = selectToolCallParserName(std::optional<std::string>("gemma4"), tok, nullptr);
+  auto got = selectModelFamily(std::optional<std::string>("gemma4"), tok, nullptr);
   ASSERT_TRUE(got.has_value());
   EXPECT_EQ(*got, std::string("gemma4"));
 }

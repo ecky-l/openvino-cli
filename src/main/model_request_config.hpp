@@ -40,7 +40,7 @@ struct ModelRequestConfig {
   double                     repetition_penalty     = 1.0;   // logit multiplier over already-generated tokens (1.0 = no penalty, >1.0 penalises repeats, <1.0 favours them; non-optional)
   std::optional<std::size_t> seed;                           // a random seed for reproducible sampling (same model/flags/seed reproduces the same sequence)
   double                     temperature              = 1.0;  // sampling temperature as a float > 0 (higher = more random, lower = more deterministic; 0 or negative = greedy; non-optional)
-  std::optional<std::string> tool_call_parser;               // tool-call (function-calling) output format/parser:  qwen35 / hermes / gemma4 / museglimmer (no short: prefix-conflicts the other 't' flags)
+  std::optional<std::string> model_family;          // model family (the reasoning / tool-call output format this model declares): qwen35 / hermes / gemma4 / museglimmer -- an explicit --model-family value OVERRIDES the family auto-detected from the rendered chat template (absent / empty = use the detected one, or none); an advertised-but-unwired name degrades to plain text.  No short: kept long-only (the leading _m_ shares the prefix with --max-tokens).
   std::size_t                top_k                    = 50;   // top-k sampling: only the k highest-probability tokens are considered (0 disables; non-optional -- a value is needed to turn it off)
   double                     top_p                    = 1.0;  // top-p (nucleus) sampling threshold 0..1: the smallest set of highest-probability tokens whose cumulative probability reaches p (1.0 = disabled; non-optional)
 

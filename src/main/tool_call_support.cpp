@@ -1,51 +1,17 @@
-// Method bodies for the model-GENERIC tool-call machinery declared in tool_call_support.hpp
-// -- the ContentStreamer that carries a selected IncrementalParser into the engine, plus the
-// registry / detect / select.  The model-SPECIFIC parsers each live in their own .cpp under
-// toolcallparsers/ (this phase: qwen35_tool_call_parser.cpp).  See the header for the design
-// rationale; this TU only carries the BODIES so the header stays a clean interface.
+// Method bodies for the model-GENERIC tool-call machinery declared in tool_call_support.hpp -- the
+// registry / detect / select / compose / bridge.  The ContentStreamer + its slot-0
+// DynamicReasoningIncrementalParser (and the kThinking* reasoning tags) moved to streaming_support.cpp;
+// we #include both headers so composeParserList can build the [reasoner, tool-parser(s)] list, and the
+// model-SPECIFIC parsers each live in their own .cpp under toolcallparsers/ (this phase:
+// qwen35_tool_call_parser.cpp).  See the header for the design rationale; this TU carries the bodies.
 #include "tool_call_support.hpp"
-
+#include "streaming_support.hpp"          // the moved ContentStreamer + slot-0 reasoner (composeParserList's slot 0)
 #include <openvino/genai/llm_pipeline.hpp>       // DecodedResults (full type; the bridge target)
-#include <openvino/genai/text_streamer.hpp>      // TextParserStreamer + get_parsed_message (the source)
-#include <openvino/genai/parsers.hpp>            // ReasoningIncrementalParser (the prepended reasoning splitter)
-
-#include <cstdio>                                // fputs / fputc / fflush -- the per-chunk JSON emit
+#include <openvino/genai/text_streamer.hpp>      // TextParserStreamer (the bridge cast target)
+#include <openvino/genai/parsers.hpp>            // IncrementalParser / ReasoningIncrementalParser (registry's tool parsers)
 
 namespace ovgenai {
 namespace toolcall {
-
-// --- ContentStreamer (carries the parser; the OpenArc Qwen35ToolCallStreamer analog; the engine
-// runs the loop + copies the result) -- The base's ctor hardcodes EMPTY detokenization params,
-// so its decode() would fall back to the tokenizer's rt_info default (skip_special_tokens = true
-// for these fixtures) and STRIP a leading ‹/thinking› -- for the 0.8B that close-of-thinking IS
-// the whole lead-in before the ‹tool_call›, so the surfaced content would collapse to empty.
-// Setting skip_special_tokens = false here keeps that 0.8B no-think lead-in verbatim (a plain
-// TextStreamer decodes a specials-preserving token stripped) instead of collapsing it to empty.
-// The carried parser routes the tool block out into the tool_calls array; a gated
-// ReasoningIncrementalParser on the list (composeParserList prepends it only when thinking is on)
-// would also split reasoning into a reasoning_content key, and the base fills the remaining
-// content either way.
-ContentStreamer::ContentStreamer(const ov::genai::Tokenizer& tok,
-                                 std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers,
-                                 std::string& acc)
-  : ov::genai::TextParserStreamer(tok, std::move(parsers)), m_acc(acc) {
-  m_additional_detokenization_params = ov::AnyMap{ ov::genai::skip_special_tokens(false) };
-}
-
-ov::genai::StreamingStatus ContentStreamer::write(ov::genai::JsonContainer& message) {
-  // Stream the result: on EVERY decoded chunk, emit the string repr of the delta message the parsers
-  // just filled (content, the reasoner's reasoning_content, and a one-shot tool_calls on the chunk
-  // where a call completes) as one compact JSON line -- replacing the old "accumulate then emit at the
-  // end".  to_json_string(-1) is the compact dumper (the worker stays one physical line).
-  std::string line = message.to_json_string(-1);
-  std::fputs(line.c_str(), stdout);
-  std::fputc('\n', stdout);
-  std::fflush(stdout);
-  // Also keep a plain (reasoning-stripped) content accumulator: unused by the terminal emitResult
-  // (the content now streams per chunk), but still read by the per-model leak/obs test checks.
-  m_acc += message["content"].as_string().value_or(std::string());
-  return ov::genai::StreamingStatus::RUNNING;
-}
 
 // The bridge the *VLM* pipeline omitted (see the header rationale): dynamic_pointer_cast is the gate --
 // it hits only for a parser-carrying streamer (our ContentStreamer, a TextParserStreamer) and misses
@@ -65,8 +31,8 @@ void bridgeParsedMessage(const std::shared_ptr<ov::genai::StreamerBase>& streame
 // / kSentry sentinels -- the model-intrinsic example_function_name / example_parameter -- are
 // owned by the per-model header).  The others stay advertised-but-unwired today (resolve to
 // null -> graceful: no parser, no turn-stop, finish_reason stays stop).
-const std::vector<ToolCallFormatSpec>& knownToolCallFormats() {
-  static const std::vector<ToolCallFormatSpec> kSpecs = {
+const std::vector<ModelFamilySpec>& knownModelFamilies() {
+  static const std::vector<ModelFamilySpec> kSpecs = {
     { "qwen35", { kSentfunc, kSentry },
       // Just this format's tool parser.  A reasoning splitter is NOT in here: a separate, gated
       // ReasoningIncrementalParser is composed beside it by composeParserList and prepended only
@@ -82,22 +48,22 @@ const std::vector<ToolCallFormatSpec>& knownToolCallFormats() {
   return kSpecs;
 }
 
-std::vector<std::string> advertisedToolCallParsers() {
+std::vector<std::string> advertisedModelFamilies() {
   std::vector<std::string> v;
-  for (const auto& s : knownToolCallFormats())
+  for (const auto& s : knownModelFamilies())
     v.push_back(s.name);
   return v;
 }
 
 std::vector<std::shared_ptr<ov::genai::IncrementalParser>> makeToolCallParserByName(const std::string& name) {
-  for (const auto& s : knownToolCallFormats())
+  for (const auto& s : knownModelFamilies())
     if (s.name == name && s.make)
       return s.make();
   return {};
 }
 
 // --- detect the model's format from its OWN loaded template (render a probe, match sentinels)
-std::optional<std::string> detectToolCallFormat(const ov::genai::Tokenizer& tok) {
+std::optional<std::string> detectModelFamily(const ov::genai::Tokenizer& tok) {
   // Probe tool arg: one dummy function tool, BUILT via the engine's own JsonContainer
   // API rather than hand-typed JSON, so the outer array and every nested object are
   // balanced by construction (a hand-typed literal here had dropped the trailing object
@@ -132,7 +98,7 @@ std::optional<std::string> detectToolCallFormat(const ov::genai::Tokenizer& tok)
   } catch (...) {
     return std::nullopt;
   }
-  for (const auto& s : knownToolCallFormats()) {
+  for (const auto& s : knownModelFamilies()) {
     if (s.sentinels.empty())
       continue;
     bool all = true;
@@ -145,11 +111,11 @@ std::optional<std::string> detectToolCallFormat(const ov::genai::Tokenizer& tok)
 }
 
 // matchFormat -- the MODEL-FREE core of the auto-detect gate (no model, no render), split
-// out from detectToolCallFormat (which renders the loaded template and then calls this) so
+// out from detectModelFamily (which renders the loaded template and then calls this) so
 // the gate is unit-testable without a model: the entry whose `sentinels` are ALL present in
 // `rendered` wins; nullopt if none match (graceful: no parser, no stop).
 std::optional<std::string> matchFormat(const std::string& rendered) {
-  for (const auto& s : knownToolCallFormats()) {
+  for (const auto& s : knownModelFamilies()) {
     if (s.sentinels.empty())
       continue;
     bool has = true;
@@ -161,17 +127,6 @@ std::optional<std::string> matchFormat(const std::string& rendered) {
   return std::nullopt;
 }
 
-// One DYNAMIC reasoner, always at slot 0 (the user's one-parser both-sides design). Reasoning is a
-// runtime TOGGLE on it (setActive), not a compose-time decision: a model may render a reasoning
-// template yet not actually reason, so render-based auto-detect is not trustworthy.
-std::shared_ptr<DynamicReasoningIncrementalParser> makeDynamicReasoningParser() {
-  return std::make_shared<DynamicReasoningIncrementalParser>(
-      /*expect_open_tag=*/false, /*keep_original_content=*/false,
-      kThinkingOpen, kThinkingClose);
-}
-std::shared_ptr<ov::genai::IncrementalParser> makeReasoningParser() {
-  return std::static_pointer_cast<ov::genai::IncrementalParser>(makeDynamicReasoningParser());
-}
 std::vector<std::shared_ptr<ov::genai::IncrementalParser>>
     composeParserList(const std::optional<std::string>& name, bool reasoner_active) {
   auto dyn = makeDynamicReasoningParser();
@@ -185,23 +140,20 @@ std::vector<std::shared_ptr<ov::genai::IncrementalParser>>
   }
   return powers;
 }
-// selectToolCallParserName -- selection precedence: an explicit --tool-call-parser name
+// selectModelFamily -- selection precedence: an explicit --model-family name
 // (override) wins; else auto-detect from the model's OWN loaded template; else no parser
 // (graceful: no stop, finish_reason stays stop, no tool_calls -- today's behaviour).
-std::optional<std::string> selectToolCallParserName(
+std::optional<std::string> selectModelFamily(
     const std::optional<std::string>& override_name,
     const ov::genai::Tokenizer& tok,
     std::optional<std::string>* detected_out) {
   if (override_name.has_value() && !override_name->empty())
     return *override_name;
-  auto d = detectToolCallFormat(tok);
+  auto d = detectModelFamily(tok);
   if (detected_out)
     *detected_out = d;
   return d;
 }
-
 }  // namespace toolcall
 }  // namespace ovgenai
-
-
 

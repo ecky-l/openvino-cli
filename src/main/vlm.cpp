@@ -33,7 +33,8 @@
 #include "model_runtime_config.hpp"   // parseModelRuntimeConfig + ModelRuntimeConfig
 #include "model_request_config.hpp"   // parseModelRequestConfig / modelRequestConfigFromJson / modelRequestConfigToJson
 #include "model_scheduler_config.hpp" // parseModelSchedulerConfig + ModelSchedulerConfig
-#include "tool_call_support.hpp"      // (b) the CLI-side tool-call parser + registry (ContentStreamer / select* / detect*)
+#include "tool_call_support.hpp"      // (b) the model-family registry + the rendered-template select / detect / compose; the engine-side carrier now lives in streaming_support.{hpp,cpp} (ContentStreamer + the always-slot-0 DynamicReasoningIncrementalParser)
+#include "streaming_support.hpp"   // the moved ContentStreamer + the always-slot-0 DynamicReasoningIncrementalParser used by composeParserList
 #include "genai_config.hpp"           // makeGenerationConfig + GenAIPipelineConfig + re-exported config types
 
 #include <boost/program_options.hpp>
@@ -725,14 +726,14 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
         ov::genai::JsonContainer::from_json_string(config::compactJsonOf(ek)));
     std::string rendered = tokenizer.apply_chat_template(
         history, pr.addGenerationPrompt, std::string(), tools, extra);
-    // (b) Resolve the tool-call parser for THIS request: an explicit --tool-call-parser name wins;
+    // (b) Resolve the model family for this request: an explicit --model-family name wins;
     // else auto-detect from the model's OWN rendered template (the model-intrinsic sentinel); else
     // none.  A selected-but-unwired name degrades (composeParserList splices no tool parser for it)
     // to reasoner-only / plain text; an auto-detected wired format is reported on stderr (never the
     // wire stdout, so the protocol stays one-JSON-per-line).
     std::optional<std::string> detectedName;
-    const auto parserName = ::ovgenai::toolcall::selectToolCallParserName(
-        reqConfig.tool_call_parser, tokenizer, &detectedName);
+    const auto parserName = ::ovgenai::toolcall::selectModelFamily(
+        reqConfig.model_family, tokenizer, &detectedName);
     // The reasoning gate is now EXPLICIT, not the model's rendered template (a model can render a
     // reasoning template yet not actually reason).  The gate is the effective thinking resolved once
     // above (resolveEffectiveThinking): a per-request chat_template_kwargs enable_thinking wins over the
@@ -741,13 +742,13 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
     // Report the tool-call selection on stderr: the explicit / auto-detected name, plus a note
     // when a selected-but-unwired name degrades to reasoner-only / plain text.
     if (parserName.has_value() && !parserName->empty()) {
-      std::fprintf(stderr, "ovgenai: vlm: using tool-call parser '%s'\n", parserName->c_str());
+      std::fprintf(stderr, "ovgenai: vlm: using model family '%s'\n", parserName->c_str());
       if (::ovgenai::toolcall::makeToolCallParserByName(*parserName).empty())
-        std::fprintf(stderr, "ovgenai: vlm: --tool-call-parser '%s' is advertised but not yet "
+        std::fprintf(stderr, "ovgenai: vlm: --model-family '%s' is advertised but not yet "
                              "wired in the CLI; degrading to plain text (no tool_calls)\n",
                      parserName->c_str());
     } else if (detectedName.has_value()) {
-      std::fprintf(stderr, "ovgenai: vlm: auto-detected tool-call format '%s' from the model's "
+      std::fprintf(stderr, "ovgenai: vlm: auto-detected model family '%s' from the model's "
                            "chat template\n", detectedName->c_str());
     }
     // The single DynamicReasoningIncrementalParser is ALWAYS first (composeParserList puts it at slot 0,

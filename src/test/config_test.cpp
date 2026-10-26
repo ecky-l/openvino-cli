@@ -108,7 +108,7 @@ TEST(parseLoadModel, badEnumsReject) {
   // reports "cannot be specified more than once" for the duplicate before our
   // finalize() can flag the bad enum value.
   expectConfigErrorContains([] {
-    parseModelRequestConfig(validMinAppend({"--tool-call-parser", "x"}));
+    parseModelRequestConfig(validMinAppend({"--model-family", "x"}));
   }, "must be one of");
 }
 
@@ -235,7 +235,7 @@ TEST(jsonRoundTrip, fullConfig) {
     "--cache-dir", "/var/ovcache",
       "--draft-model", "/opt/draft", "--draft-device", "CPU",
       "--num-assistant-tokens", "4", "--assistant-confidence-threshold", "0.5",
-      "--tool-call-parser", "qwen35",
+      "--model-family", "qwen35",
       "--kv-cache-precision", "bf16",
       "--max-num-seqs", "2",
   };
