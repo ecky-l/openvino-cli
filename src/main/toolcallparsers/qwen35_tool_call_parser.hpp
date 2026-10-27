@@ -134,6 +134,8 @@ private:
   bool         m_value_started = false;
   bool         m_pending_newline = false;
   bool         m_stopped = false;
+  std::size_t  m_calls_seen = 0;                  // total calls started this turn; >0 makes OUTSIDE real text a stream stop
+  std::uint64_t m_next_id = 0;                    // monotonic across reset() -> a globally-unique streamed id (call_N)
   std::vector<ov::genai::JsonContainer> m_calls;   // completed calls (== the tool_calls list)
   FragmentSink  m_on_fragment;                     // the per-step fragment sink (the carrier); null when driven directly
   std::vector<std::string> m_errors;

@@ -115,10 +115,20 @@ std::string Qwen35ToolCallParser::parse(
   // emits it as a (single-element) tool_calls array.
   finishTruncated();
 
-  // A call completed this step -> write the consolidated tool_calls ARRAY (only this once: the
-  // caller then stops, so a later delta never re-writes the key, which keeps concatenate happy),
-  // and flip the status so the engine halts and the CLI reports the uniform "tool_calls".
-  if (m_calls.size() > completed_before) {
+  // A call completed this step.  Two needs, split by whether a sink is wired:
+  //   * model-free / offline (m_on_fragment null): there is no running engine to hand the end signal
+  //     to and no 2nd call in a unit test, so fold the consolidated array into delta_message here AND
+  //     flip TOOL_CALL_STOP + m_stopped -- the polled end-of-turn signal the direct caller reads
+  //     (this is the behaviour the model-free unit tests characterise; a single call per delta never
+  //     re-sets the key, so the base concatenate stays happy);
+  //   * live carrier (a non-null sink is wired): a turn may carry SEVERAL calls (stop_after_tool_call
+  //     == False, the Qwen3.5 default) so ALL must be parsed and streamed alike -> do NOT stop, and do
+  //     NOT touch delta_message (a 2nd call re-setting an array key WOULD throw in the base
+  //     concatenate).  The consolidated (all calls -> one index-free OpenAI array) is assembled once
+  //     at the end by ContentStreamer::consolidatedMessage() via the bridge instead; the model's own
+  //     end-of-input token ends the turn, and the OUTSIDE branch above is the safety stop for a model
+  //     that rambles after its block.
+  if (m_calls.size() > completed_before && !m_on_fragment) {
     emitToolCalls(delta_message);
     set_status(ov::genai::StreamingStatus::TOOL_CALL_STOP);
     m_stopped = true;
@@ -136,6 +146,8 @@ void Qwen35ToolCallParser::reset() {
   m_cur = std::nullopt;
   m_id.clear();
   m_cur_index = 0;
+  m_calls_seen = 0;                  // a new turn renumbers the array-element index from 0
+  // (m_next_id is intentionally NOT cleared -> streamed ids stay globally unique across turns)
   m_name.clear();
   m_arguments_buf.clear();
   m_param_name.clear();
@@ -157,7 +169,22 @@ void Qwen35ToolCallParser::machine(std::vector<std::string>& out, bool atEnd) {
 
     if (m_state == State::OUTSIDE) {
       if (m_pending.empty()) return;
-      out.push_back(m_pending);       // everything outside a block is content (reasoning lead-in...)
+      if (m_calls_seen == 0) {
+        // No call has started yet: everything before the first one is content (reasoning lead-in, etc.).
+        out.push_back(m_pending);
+        m_pending.clear();
+        return;
+      }
+      // A call has been seen.  Real text AFTER a completed call means the model is rambling past its
+      // answer -> stop the stream (the faithful OpenArc stop_after_tool_call=False guard); bare
+      // whitespace between/after calls is just dropped.  (Only the live carrier relies on this; the
+      // model-free direct API already stops at the first completion, see parse().)
+      if (q35_tr(m_pending).empty()) {         // whitespace after a call -> drop
+        m_pending.clear();
+        return;
+      }
+      set_status(ov::genai::StreamingStatus::TOOL_CALL_STOP);
+      m_stopped = true;
       m_pending.clear();
       return;
     }
@@ -293,8 +320,15 @@ void Qwen35ToolCallParser::applyBoundary(std::int64_t tag_id) {
 }
 
 void Qwen35ToolCallParser::startCall() {
-  m_cur_index = m_calls.size();
-  m_id = "call_" + std::to_string(m_cur_index);
+  // The array-element position of THIS call within the turn's tool_calls (== calls already seen),
+  // so a fragment's index is exactly where its call lands in the consolidated array (req 2).  The id
+  // is a monotonic, turn-independent counter -> call_0, call_1, ... unique across a whole session
+  // (reset() deliberately does NOT touch m_next_id; the reference uses a uuid, we use a number --
+  // the user's "unique, incremental" ask).
+  m_cur_index = m_calls_seen;
+  ++m_calls_seen;
+  m_id = "call_" + std::to_string(m_next_id);
+  ++m_next_id;
   ov::genai::JsonContainer fn = ov::genai::JsonContainer::object();
   fn["name"] = std::string("");
   fn["arguments"] = std::string("");

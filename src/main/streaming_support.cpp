@@ -20,7 +20,31 @@ void bridgeParsedMessage(const std::shared_ptr<ov::genai::StreamerBase>& streame
   auto tps = std::dynamic_pointer_cast<ov::genai::TextParserStreamer>(streamer);
   if (!tps) return;
   if (res.parsed.empty()) res.parsed.resize(1);
-  res.parsed[0] = tps->get_parsed_message();
+  // A ContentStreamer carries the tool parser and assembles the consolidated (ALL calls -> one
+  // index-free array) so a multi-call turn still lands fully in res.parsed; a plain TextParserStreamer
+  // (no ContentStreamer / no tool parser) just gets the folded message.
+  if (auto cs = std::dynamic_pointer_cast<ContentStreamer>(streamer))
+    res.parsed[0] = cs->consolidatedMessage();
+  else
+    res.parsed[0] = tps->get_parsed_message();
+}
+
+// Assemble the full passed-through result (above): the base's accumulated content + reasoning_content,
+// plus a one-time consolidated tool_calls array from the carried parser's completed_calls() (every
+// call, all of them).  No-op add for a content-only turn / a non-tool family (m_tool null or no
+// completed calls) -> the message is returned unchanged.
+ov::genai::JsonContainer ContentStreamer::consolidatedMessage() const {
+  ov::genai::JsonContainer msg = get_parsed_message();
+  if (m_tool) {
+    const std::vector<ov::genai::JsonContainer>& calls = m_tool->completed_calls();
+    if (!calls.empty()) {
+      ov::genai::JsonContainer arr = ov::genai::JsonContainer::array();
+      for (const auto& c : calls)
+        arr.push_back(c);                 // index-free OpenAI {id, type:function:{name,arguments}} -- every call
+      msg["tool_calls"] = arr;
+    }
+  }
+  return msg;
 }
 
 // --- the registry: every advertised name -> an entry (wired iff `make` is non-null) --------
@@ -258,6 +282,7 @@ std::shared_ptr<ContentStreamer> ContentStreamer::instance(
   // Wire the qwen35 tool parser's per-step fragment sink -> the streamer's display buffer (weak_ptr
   // so the streamer<->parser references form no ownership cycle).
   if (qwenTool) {
+    streamer->m_tool = qwenTool;          // record it so consolidatedMessage() can build the all-calls array
     std::weak_ptr<ContentStreamer> weakStreamer = streamer;
     qwenTool->setOnFragment([weakStreamer](const ov::genai::JsonContainer& fragment) {
       if (auto s = weakStreamer.lock())

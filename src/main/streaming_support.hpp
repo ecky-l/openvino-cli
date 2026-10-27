@@ -142,6 +142,16 @@ public:
 
   ov::genai::StreamingStatus write(ov::genai::JsonContainer& message) override;
 
+  // The FULL, final-passthrough result consumed by the bridge -> res.parsed (the VLM pipeline that
+  // `vlm` drives never fills res.parsed on its own -- only the LLM pipeline does).  It is the base's
+  // get_parsed_message() (accumulated content + reasoning_content) PLUS the consolidated tool_calls
+  // array assembled here from the carried parser's completed_calls() -- every call the turn produced
+  // (a multi-call turn is several, stop_after_tool_call == False), each index-free OpenAI shape
+  // { id, type, function:{ name, arguments } }.  Assembled at the END (not per-delta), it never has
+  // to survive the engine's per-delta concatenate (which throws on a list key re-set across deltas)
+  // and can never lose a call after the first.  Empty for a content-only turn / a non-tool family.
+  ov::genai::JsonContainer consolidatedMessage() const;
+
   // The per-step fragment sink the carried parser forwards into (wired via its on_fragment in
   // instance(), reached through a weak_ptr so there is no ownership cycle).  Appended here; the next
   // write() drains it onto stdout as this delta's tool_calls (req 2).  Only the qwen35 family wires
@@ -152,6 +162,7 @@ private:
   std::string& m_acc;                                            // the output the caller drains (specials preserved)
   std::shared_ptr<DynamicReasoningIncrementalParser> m_dyn;       // the slot-0 reasoner (retained for activateEnableThinking; null if none)
   ov::genai::JsonContainer m_tool_calls;                         // this delta's per-step tool_calls fragments (drained in write)
+  std::shared_ptr<Qwen35ToolCallParser> m_tool = nullptr;         // the carried tool parser (qwen35 only; null otherwise) -- the consolidated all-calls source
 };
 
 // A runtime on/off on the reasoning splitter, NOT a compose-time gate: one DynamicReasoningIncrementalParser

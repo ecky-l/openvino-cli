@@ -283,7 +283,11 @@ TEST(qwen35_tool_call_parser, drivesParserFromTockenizedCapturedOutputs) {
     std::vector<ov::Tensor> noImages;
     (void)pipe.generate(std::string(), noImages, ov::genai::GenerationConfig{}, sv);
     // (5) what the engine copies into res.parsed[0] -- the streamer's folded message.
-    const ov::genai::JsonContainer msg = streamer->get_parsed_message();
+    const ov::genai::JsonContainer msg = streamer->consolidatedMessage();
+  // (the live, wired-sink parser no longer folds tool_calls into the per-delta message -- a 2nd call
+  // set into it would throw the engine's base concatenate -- so the consolidated, all-calls result is
+  // read via consolidatedMessage(): content + reasoning_content + the full tool_calls array, exactly
+  // what vlm.cpp's bridge puts into res.parsed.)
 
     // (a) a tool_calls ARRAY was produced; it must be exactly one entry in the OpenAI call shape
     //     { "id", "type":"function", "function":{ "name", "arguments" } } -- name read from
