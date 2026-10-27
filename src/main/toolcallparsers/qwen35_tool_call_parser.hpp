@@ -30,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -92,6 +93,18 @@ public:
   // Every completed call so far, in completion order -- the consolidated tool_calls list.
   const std::vector<ov::genai::JsonContainer>& completed_calls() const { return m_calls; }
 
+  // --- the per-STEP streaming display channel (req 2).  The C++ analog of OpenArc
+  // QwenXMLToolParser.on_fragment: a single fragment-sink the carrier (ContentStreamer) wires.
+  // When wired, every fragment the state machine produces -- the empty {index, id, type, function}
+  // a call opens with, then the {index, function:{name}} once the name resolves, then a
+  // {index, function:{arguments:FRAG}} per argument fragment -- is forwarded for the carrier to
+  // emit on stdout (so tool_calls is streamed AS the tool is detected, gradually populated).
+  // A fragment's `index` is that call's array-element position in the final tool_calls list.
+  // A null sink (the model-free test harness drives the parser directly) makes every frag() a
+  // no-op, so the consolidated emitToolCalls path (the only writer of delta_message) is unchanged.
+  using FragmentSink = std::function<void(const ov::genai::JsonContainer& fragment)>;
+  void setOnFragment(FragmentSink sink) { m_on_fragment = std::move(sink); }
+
 private:
   // The state machine (OUTSIDE / HEAD / FUNC_NAME / BODY / PARAM_NAME / PARAM / TAIL).  `atEnd`
   // means the buffer ends at a boundary / stream end, so no tag may be held back waiting for more.  ('final' is a C++ keyword, so named atEnd.)
@@ -104,6 +117,7 @@ private:
   void consumeValue(const std::string& text, bool atEnd);  // a parameter-value delta
   void finishTruncated();                                 // the in-parse truncated-finalize
   void emitToolCalls(ov::genai::JsonContainer& msg);      // write the consolidated tool_calls ARRAY
+  void frag(const ov::genai::JsonContainer& fragment);    // forward one built fragment to m_on_fragment (no-op if null)
 
   // The machine working buffer (mirror of Python self._pending).
   std::string  m_pending;
@@ -121,6 +135,7 @@ private:
   bool         m_pending_newline = false;
   bool         m_stopped = false;
   std::vector<ov::genai::JsonContainer> m_calls;   // completed calls (== the tool_calls list)
+  FragmentSink  m_on_fragment;                     // the per-step fragment sink (the carrier); null when driven directly
   std::vector<std::string> m_errors;
 };
 

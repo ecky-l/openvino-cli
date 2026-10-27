@@ -142,9 +142,16 @@ public:
 
   ov::genai::StreamingStatus write(ov::genai::JsonContainer& message) override;
 
+  // The per-step fragment sink the carried parser forwards into (wired via its on_fragment in
+  // instance(), reached through a weak_ptr so there is no ownership cycle).  Appended here; the next
+  // write() drains it onto stdout as this delta's tool_calls (req 2).  Only the qwen35 family wires
+  // it; an unwired/plain streamer's parser simply never calls it.
+  void collectFragment(const ov::genai::JsonContainer& fragment);
+
 private:
   std::string& m_acc;                                            // the output the caller drains (specials preserved)
   std::shared_ptr<DynamicReasoningIncrementalParser> m_dyn;       // the slot-0 reasoner (retained for activateEnableThinking; null if none)
+  ov::genai::JsonContainer m_tool_calls;                         // this delta's per-step tool_calls fragments (drained in write)
 };
 
 // A runtime on/off on the reasoning splitter, NOT a compose-time gate: one DynamicReasoningIncrementalParser

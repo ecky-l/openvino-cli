@@ -189,7 +189,16 @@ void Qwen35ToolCallParser::machine(std::vector<std::string>& out, bool atEnd) {
       const std::string name = q35_tr(m_pending.substr(0, gt));
       m_pending = m_pending.substr(gt + 1);
       m_name = name;
-      if (m_cur) (*m_cur)["function"]["name"] = name;    // collected function-name fragment
+      if (m_cur) {
+        (*m_cur)["function"]["name"] = name;    // collected function-name fragment
+        // The name just resolved -> forward {index, function:{name: NAME}} (req 2).
+        ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+        f["index"] = static_cast<std::int64_t>(m_cur_index);
+        ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
+        ff["name"] = name;
+        f["function"] = ff;
+        frag(f);
+      }
       m_state = State::BODY;
       continue;
     }
@@ -224,7 +233,28 @@ void Qwen35ToolCallParser::machine(std::vector<std::string>& out, bool atEnd) {
       // give `{city: ...`, invalid JSON).  Then `: ` + the opening quote of the value.
       const std::string sep = (m_param_index == 0) ? "{" : ", ";
       m_param_index += 1;
-      m_arguments_buf += sep + "\"" + jsonEscape(m_param_name) + "\": \"";
+      // The opening-argument fragment `{<key>: "}` (the quoted key + ": " + the value's open quote).
+      // The SAME string is appended to the running buffer AND forwarded as two fragments -- mirrors
+      // QwenXMLToolParser, which _frag's f"{sep}{json.dumps(name)}: " then a lone '"' -- so the streamed
+      // tool_calls (req 2) and the consolidated arguments stay in lock-step.
+      const std::string kwarg = sep + "\"" + jsonEscape(m_param_name) + "\": \"";
+      m_arguments_buf += kwarg;
+      {
+        ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+        f["index"] = static_cast<std::int64_t>(m_cur_index);
+        ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
+        ff["arguments"] = kwarg;
+        f["function"] = ff;
+        frag(f);
+      }
+      {
+        ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+        f["index"] = static_cast<std::int64_t>(m_cur_index);
+        ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
+        ff["arguments"] = std::string("\"");
+        f["function"] = ff;
+        frag(f);
+      }
       continue;
     }
     if (m_state == State::PARAM) {
@@ -273,6 +303,20 @@ void Qwen35ToolCallParser::startCall() {
   call["type"] = std::string("function");
   call["function"] = fn;
   m_cur = call;                                 // the in-progress call (carries id + the open flag)
+  // A call just OPENED -> forward the initial empty fragment {index, id, type, function:{name:"",
+  // arguments:""}} so the carrier streams the (name/arguments-empty) tool_calls the instant a tool
+  // is detected (req 2).  This is the live path; when m_on_fragment is null it is a no-op.
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = static_cast<std::int64_t>(m_cur_index);
+    f["id"] = m_id;
+    f["type"] = std::string("function");
+    ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
+    ff["name"] = std::string("");
+    ff["arguments"] = std::string("");
+    f["function"] = ff;
+    frag(f);
+  }
   m_name.clear();
   m_param_index = 0;
   m_state = State::HEAD;
@@ -287,7 +331,17 @@ void Qwen35ToolCallParser::startCall() {
 void Qwen35ToolCallParser::finishCall() {
   if (!m_cur) { m_state = State::OUTSIDE; m_skip_rest = false; return; }
   // The closing } (or {} for a zero-argument function) -- the final arguments fragment.
-  m_arguments_buf += (m_param_index > 0) ? "}" : "{}";
+  const std::string closeTok = (m_param_index > 0) ? "}" : "{}";
+  m_arguments_buf += closeTok;
+  // Forward {index, function:{arguments: closeTok}} (req 2) before the call is folded into m_calls.
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = static_cast<std::int64_t>(m_cur_index);
+    ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
+    ff["arguments"] = closeTok;
+    f["function"] = ff;
+    frag(f);
+  }
   ov::genai::JsonContainer fn = ov::genai::JsonContainer::object();
   fn["name"] = m_name;
   fn["arguments"] = m_arguments_buf;
@@ -319,8 +373,28 @@ void Qwen35ToolCallParser::consumeValue(const std::string& text, bool atEnd) {
   if (!v.empty()) {
     m_param_raw += v;
     m_arguments_buf += jsonEscape(v);           // a parameter-value fragment
+    // The raw value just decoded -> forward {index, function:{arguments: escaped}} (req 2).
+    {
+      ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+      f["index"] = static_cast<std::int64_t>(m_cur_index);
+      ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
+      ff["arguments"] = jsonEscape(v);
+      f["function"] = ff;
+      frag(f);
+    }
   }
-  if (atEnd) m_arguments_buf += "\"";           // close the current value's JSON string
+  if (atEnd) {
+    m_arguments_buf += "\"";                    // close the current value's JSON string
+    // Close the value's JSON string -> forward {index, function:{arguments: "\""}} (req 2).
+    {
+      ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+      f["index"] = static_cast<std::int64_t>(m_cur_index);
+      ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
+      ff["arguments"] = std::string("\"");
+      f["function"] = ff;
+      frag(f);
+    }
+  }
 }
 
 void Qwen35ToolCallParser::finishTruncated() {
@@ -337,6 +411,11 @@ void Qwen35ToolCallParser::emitToolCalls(ov::genai::JsonContainer& msg) {
   ov::genai::JsonContainer arr = ov::genai::JsonContainer::array();
   for (const auto& c : m_calls) arr.push_back(c);
   msg["tool_calls"] = arr;                    // the consolidated tool_calls array
+}
+
+void Qwen35ToolCallParser::frag(const ov::genai::JsonContainer& fragment) {
+  if (m_on_fragment)
+    m_on_fragment(fragment);   // forward to the wired sink (the carrier); no-op when driven directly
 }
 
 // ---- Qwen35BoundarySynthesizer (model-free text path) = the OpenArc _TextTagSynthesizer ----

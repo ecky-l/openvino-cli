@@ -156,19 +156,63 @@ ContentStreamer::ContentStreamer(const ov::genai::Tokenizer& tok,
                                    const std::shared_ptr<DynamicReasoningIncrementalParser>& dyn)
   : TextParserStreamer(tok, std::move(parsers)), m_acc(acc), m_dyn(dyn) {
   m_additional_detokenization_params = ov::AnyMap{ ov::genai::skip_special_tokens(false) };
+  m_tool_calls = ov::genai::JsonContainer::array();   // the per-step tool_calls buffer (drained each write)
 }
+// Append one per-step tool fragment the carried parser forwarded (via on_fragment) to this delta's
+// tool_calls buffer; the next write() drains it onto stdout (req 2).
+void ContentStreamer::collectFragment(const ov::genai::JsonContainer& fragment) {
+  m_tool_calls.push_back(fragment);
+}
+
+// Stream the result.  Build the emitted line FROM SCRATCH so the output carries only keys with a
+// non-empty value (and nothing for an all-empty delta):
+//   * content / reasoning_content are omitted when absent OR an empty string (req 1) -- so a
+//     tool-only or blank delta comes out with no "content":"", instead of the old always-on one;
+//   * tool_calls is the per-STEP fragment list the carried parser forwarded (req 2: emitted the
+//     moment the call is detected, then re-emitted with a fragment added on every step, gradually
+//     populated name -> arguments).  Read from the m_tool_calls buffer, NOT from `message`: the
+//     consolidate-at-completion tool_calls that emitToolCalls writes into `message` would throw in the
+//     next delta's concatenate() (array vs array).  That consolidated array stays in the folded
+//     message for the get_parsed_message -> res.parsed bridge; the streamed (gradual) one goes to
+//     stdout here.  to_json_string(-1) is the compact dumper (one physical line per delta).
 ov::genai::StreamingStatus ContentStreamer::write(ov::genai::JsonContainer& message) {
-  // Stream the result: on EVERY decoded chunk, emit the string repr of the delta message the parsers
-  // just filled (content, the reasoner's reasoning_content, and a one-shot tool_calls on the chunk
-  // where a call completes) as one compact JSON line -- replacing the old "accumulate then emit at the
-  // end".  to_json_string(-1) is the compact dumper (the worker stays one physical line).
-  std::string line = message.to_json_string(-1);
+  ov::genai::JsonContainer out = ov::genai::JsonContainer::object();
+  bool emitted = false;
+
+  // Guard each read with contains(): operator[](key).as_string() is a Read-mode access that THROWS
+  // if the path is absent.  The base always sets content (so that key is present), but a no-think /
+  // non-thinker turn has NO reasoning_content key at all -- an unguarded read would throw on the very
+  // first tool-only delta (it would, on the real vlm path, abort the whole generation).
+  std::optional<std::string> content;
+  if (message.contains("content"))
+    content = message["content"].as_string();
+  if (content && !content->empty()) {
+    out["content"] = *content;
+    emitted = true;
+  }
+  std::optional<std::string> reasoning;
+  if (message.contains("reasoning_content"))
+    reasoning = message["reasoning_content"].as_string();
+  if (reasoning && !reasoning->empty()) {
+    out["reasoning_content"] = *reasoning;
+    emitted = true;
+  }
+  if (!m_tool_calls.empty()) {
+    out["tool_calls"] = m_tool_calls;       // the per-step fragments for THIS delta (req 2)
+    emitted = true;
+  }
+  m_tool_calls = ov::genai::JsonContainer::array();   // fresh buffer for the next delta
+
+  if (!emitted)
+    return ov::genai::StreamingStatus::RUNNING;       // all-empty delta -> emit no line
+
+  std::string line = out.to_json_string(-1);
   std::fputs(line.c_str(), stdout);
   std::fputc('\n', stdout);
   std::fflush(stdout);
   // Also keep a plain (reasoning-stripped) content accumulator: unused by the terminal emitResult
   // (the content now streams per chunk), but still read by the per-model leak/obs test checks.
-  m_acc += message["content"].as_string().value_or(std::string());
+  m_acc += content.value_or(std::string());
   return ov::genai::StreamingStatus::RUNNING;
 }
 
@@ -189,6 +233,9 @@ std::shared_ptr<ContentStreamer> ContentStreamer::instance(
 
   std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers;
   std::shared_ptr<DynamicReasoningIncrementalParser> reasoner;
+  std::shared_ptr<Qwen35ToolCallParser> qwenTool;   // function-scoped (like parsers/reasoner) so the
+                                                    // wiring below -- after the family branch closes --
+                                                    // stays in scope; null for any non-qwen35 family
   if (modelFamily == "qwen35") {
 	// The reasoning tags for THIS family only -- LOCAL here (not namespace-wide constants), built from the
 	// per-model header's LT / GT angle-byte constants (bracket-safety: no literal angle byte in this source,
@@ -199,10 +246,24 @@ std::shared_ptr<ContentStreamer> ContentStreamer::instance(
         /*expect_open_tag=*/false, /*keep_original_content=*/false, kThinkOpen, kThinkClose);
     parsers.push_back(std::static_pointer_cast<ov::genai::IncrementalParser>(reasoner));
     const auto tools = makeToolCallParserByName(modelFamily);   // the model-specific Qwen35ToolCallParser
+    // Grab a concrete handle to THIS just-built tool parser so, once the streamer exists below, we
+    // can forward each per-step tool fragment (req 2) into its stdout display (weak_ptr -> cycle-free).
+    for (auto& p : tools) {
+      if (auto q = std::dynamic_pointer_cast<Qwen35ToolCallParser>(p)) { qwenTool = q; break; }
+    }
     parsers.insert(parsers.end(), tools.begin(), tools.end());
   }
   auto streamer = std::make_shared<ContentStreamer>(tok, std::move(parsers), acc, reasoner);
   streamer->activateEnableThinking(enableThinking);
+  // Wire the qwen35 tool parser's per-step fragment sink -> the streamer's display buffer (weak_ptr
+  // so the streamer<->parser references form no ownership cycle).
+  if (qwenTool) {
+    std::weak_ptr<ContentStreamer> weakStreamer = streamer;
+    qwenTool->setOnFragment([weakStreamer](const ov::genai::JsonContainer& fragment) {
+      if (auto s = weakStreamer.lock())
+        s->collectFragment(fragment);
+    });
+  }
   return streamer;
 }
 
