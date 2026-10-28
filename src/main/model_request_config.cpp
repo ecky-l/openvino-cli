@@ -16,6 +16,7 @@
 #include "streaming_support.hpp"        // advertisedModelFamilies() -- one source of truth for accepted --model-family names
 
 #include <algorithm>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -45,6 +46,23 @@ double parseDouble(const std::string& s, const char* flag) {
     return v;
   } catch (...) {
     throw ConfigError(std::string("invalid number for ") + flag + ": '" + s + "'");
+  }
+}
+
+// Parse a SIGNED base-10 integer for the CLI (unlike config's parseSize, it ALLOWS a leading '-':
+// --stream may be 0 or negative to mean "no streaming, emit one total at the end" -- a negative is a
+// valid, named value, not an error).  The result is clamped into int range so an absurdly large input
+// degrades to "aggregate the whole stream" (a positive INT_MAX) rather than wrapping to a misleading N.
+int parseSignedInt(const std::string& s, const char* flag) {
+  try {
+    size_t pos = 0;
+    const long long v = std::stoll(s, &pos);
+    if (pos != s.size()) throw std::invalid_argument("trailing characters");
+    if (v > std::numeric_limits<int>::max()) return std::numeric_limits<int>::max();
+    if (v < std::numeric_limits<int>::min()) return std::numeric_limits<int>::min();
+    return static_cast<int>(v);
+  } catch (...) {
+    throw ConfigError(std::string("invalid integer for ") + flag + ": '" + s + "'");
   }
 }
 
@@ -84,6 +102,22 @@ void readOptInt(rapidjson::Document& doc, const char* key,
   if (it->value.GetInt64() < 0)
     throw ConfigError(std::string(path) + ": must be non-negative");
   out = static_cast<std::size_t>(it->value.GetUint64());
+}
+
+// Like readOptInt but ALLOWS negatives and yields a signed optional: the --stream wire key may be 0 or
+// negative to mean "no streaming, one total at end", and it must round-trip across the worker's
+// per-request gen_config (so the same "stream" key it reads is the one the writer emits).  Absent or
+// null leaves the field at its struct default (nullopt); a value is clamped into int range.
+void readOptIntSigned(rapidjson::Document& doc, const char* key,
+                      std::optional<int>& out, const char* path) {
+  auto it = doc.FindMember(key);
+  if (it == doc.MemberEnd() || it->value.IsNull()) return;
+  if (!it->value.IsInt() && !it->value.IsInt64())
+    throw ConfigError(std::string(path) + ": expected an integer");
+  const long long v = it->value.GetInt64();
+  if (v > std::numeric_limits<int>::max()) out = std::numeric_limits<int>::max();
+  else if (v < std::numeric_limits<int>::min()) out = std::numeric_limits<int>::min();
+  else out = static_cast<int>(v);
 }
 
 void readOptDouble(rapidjson::Document& doc, const char* key,
@@ -166,6 +200,13 @@ po::options_description ModelRequestConfig::requestOptionsDesc() {
         ">1.0 penalises repeated tokens, <1.0 favours them.")
     ("seed", po::value<std::string>(),
         "A random seed for reproducible sampling (the same model / flags / seed reproduces the same token sequence).")
+    ("stream", po::value<std::string>(),
+        "Token aggregation for the vlm streaming output: how many tokens to fold into ONE emitted "
+        "JSON line (default 1 = one line per token, as today).  N>1 aggregates N tokens per line; "
+        "N<=0 emits NO mid-stream output and instead writes a single total line (all of content / "
+        "reasoning_content / tool_calls that the turn produced) at the end of the stream.  Long-only: "
+        "its leading 's' conflicts with --seed, so it takes no short form (like --model-family vs "
+        "--max-tokens).  Only meaningful for vlm; the worker may also set it per request via gen_config.")
     ("temperature", po::value<std::string>(),
         "Sampling temperature as a float > 0 -- higher = more random/uniform, lower = more "
         "deterministic; 0 or negative = greedy (deterministic) decoding. Default 1.0.")
@@ -268,6 +309,8 @@ ModelRequestConfig parseModelRequestConfig(const std::vector<std::string>& args)
   if (vm.count("seed"))
     cfg.seed = static_cast<std::size_t>(
         parseSize(vm["seed"].as<std::string>(), "--seed"));
+  if (vm.count("stream"))
+    cfg.stream = parseSignedInt(vm["stream"].as<std::string>(), "--stream");
   if (vm.count("temperature"))
     cfg.temperature = parseDouble(vm["temperature"].as<std::string>(), "--temperature");
   if (vm.count("model-family")) {
@@ -319,6 +362,7 @@ ModelRequestConfig modelRequestConfigFromJson(const std::string& json) {
   readOptDouble(doc, "presence_penalty",  cfg.presence_penalty,   "runtime_config.presence_penalty");
   readDefaultDouble(doc, "repetition_penalty", cfg.repetition_penalty, "runtime_config.repetition_penalty");
   readOptInt(doc,    "seed",              cfg.seed,               "runtime_config.seed");
+  readOptIntSigned(doc, "stream",          cfg.stream,             "runtime_config.stream");
   readDefaultDouble(doc, "temperature",   cfg.temperature,        "runtime_config.temperature");
   readOptStr(doc,    "model_family",  cfg.model_family,   "runtime_config.model_family");
   readDefaultSize(doc,   "top_k",         cfg.top_k,              "runtime_config.top_k");
@@ -332,6 +376,13 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
   auto addInt    = [&](const char* key, std::size_t v) {
     rapidjson::Value k(key, a);
     rapidjson::Value val; val.SetUint64(v);
+    out.AddMember(k, val, a);
+  };
+  // A SIGNED int value (for --stream, which may be <= 0 to mean "no streaming, one total at end" -- a
+  // negative/zero a plain addInt/ SetUint64 would mangle).  SetInt64 stores it correctly.
+  auto addSignedInt = [&](const char* key, int v) {
+    rapidjson::Value k(key, a);
+    rapidjson::Value val; val.SetInt64(static_cast<long long>(v));
     out.AddMember(k, val, a);
   };
   auto addDouble = [&](const char* key, double v) {
@@ -370,6 +421,7 @@ std::string modelRequestConfigToJson(const ModelRequestConfig& c) {
   if (c.presence_penalty.has_value()) addDouble("presence_penalty", *c.presence_penalty);
   addDouble("repetition_penalty", c.repetition_penalty);
   if (c.seed.has_value()) addInt("seed", *c.seed);
+  if (c.stream.has_value()) addSignedInt("stream", *c.stream);
   addDouble("temperature",     c.temperature);
   if (c.model_family && !c.model_family->empty())
     addStr("model_family", *c.model_family);

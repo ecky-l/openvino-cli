@@ -100,8 +100,10 @@ class DynamicReasoningIncrementalParser;
 // The engine-side content / parser-carrying streamer (the OpenArc Qwen35ToolCallStreamer analog): its
 // TextParserStreamer base keeps the parser loop and copies its folded get_parsed_message() into the
 // result; this streamer also appends the (specials-preserving) content the caller drains, per chunk.
-// The ONE control the user gets is activateEnableThinking -- a friend delegate to the reasoner's now
-// private setActive.  A static instance() factory (declared below) builds + returns the proper streamer
+// The TWO controls the user gets are activateEnableThinking -- a friend delegate to the reasoner's now
+// private setActive (the reasoning on/off) -- and the --stream N count (the token-aggregation size:
+// 1 == today, one emitted line per token; >1 == N tokens per line; <=0 == no mid-stream output, a single
+// total line at end()).  A static instance() factory (declared below) builds + returns the proper streamer
 // for a modelFamily: for "qwen35" the always-slot-0 DynamicReasoningIncrementalParser (the qwen35 reasoning
 // open / close-of-thinking tags, with expect_open_tag = false and keep_original_content = false -- those
 // tags are LOCAL to instance(), not namespace-wide constants) followed by the family's tool parser(s) (the
@@ -116,11 +118,15 @@ public:
                   std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers,
                   std::string& acc);
   // the instance() entry-point ctor: everything the 3-arg ctor does, PLUS retaining a handle to the
-  // always-slot-0 reasoner so activateEnableThinking can flip it after construction.
+  // always-slot-0 reasoner (so activateEnableThinking can flip it), PLUS the --stream N aggregation
+  // factor (default 1 == today, one emitted line per token; >1 == N tokens per line; <=0 == no streaming,
+  // a single total line at end()).  A defaulted 5th arg so a caller that omits it -- including the
+  // 3-arg delegating ctor -- keeps today's per-token behaviour.
   ContentStreamer(const ov::genai::Tokenizer& tok,
                   std::vector<std::shared_ptr<ov::genai::IncrementalParser>> parsers,
                   std::string& acc,
-                  const std::shared_ptr<DynamicReasoningIncrementalParser>& dyn);
+                  const std::shared_ptr<DynamicReasoningIncrementalParser>& dyn,
+                  int stream = 1);
 
   // The SOLE public control of the always-slot-0 reasoning splitter -- a delegate to that reasoner's
   // (now private) setActive, reachable because ContentStreamer is its friend.  enableThinking = true turns
@@ -138,9 +144,16 @@ public:
   // composeParserList, now folded in here.)
   static std::shared_ptr<ContentStreamer> instance(
       const ov::genai::Tokenizer& tok, const std::string& modelFamily,
-      bool enableThinking, std::string& acc);
+      bool enableThinking, std::string& acc, int stream = 1);
 
   ov::genai::StreamingStatus write(ov::genai::JsonContainer& message) override;
+
+  // The terminal end-of-stream hook (overrides TextStreamer::end(), which the engine's generate loop
+  // invokes once, idempotently, after the last token -- via ThreadedStreamerWrapper).  It first lets
+  // the base flush its trailing decoded text (one more write(JsonContainer) -> accumulates it into the
+  // aggregate buffer), THEN calls emitAggregate() to emit whatever is left: a final partial chunk for
+  // --stream N>=1, or the WHOLE stream for --stream N<=0 (no mid-stream lines at all).
+  void end() override;
 
   // The FULL, final-passthrough result consumed by the bridge -> res.parsed (the VLM pipeline that
   // `vlm` drives never fills res.parsed on its own -- only the LLM pipeline does).  It is the base's
@@ -163,6 +176,27 @@ private:
   std::shared_ptr<DynamicReasoningIncrementalParser> m_dyn;       // the slot-0 reasoner (retained for activateEnableThinking; null if none)
   ov::genai::JsonContainer m_tool_calls;                         // this delta's per-step tool_calls fragments (drained in write)
   std::shared_ptr<Qwen35ToolCallParser> m_tool = nullptr;         // the carried tool parser (qwen35 only; null otherwise) -- the consolidated all-calls source
+
+  // --- token aggregation (--stream N): the emitted line carries N tokens, not one ------------
+  // m_stream is the requested N from the --stream flag (1 == default == today): the per-emit
+  // aggregation size.  m_stream_count counts the output-bearing deltas accumulated since the last
+  // emit; a line is emitted when it reaches m_stream.  The three buffers (content / reasoning / the
+  // accumulated tool_calls fragments) span the whole current window: an N>=1 window is N deltas, an
+  // N<=0 window is the ENTIRE stream (one total at end).
+  int m_stream = 1;                                              // the --stream N (default 1 == per-token); <=0 disables mid-stream output
+  int m_stream_count = 0;                                        // output-bearing deltas accumulated since the last emit (reset per window)
+  std::string m_buf_content;                                     // this window's accumulated content (specials preserved)
+  std::string m_buf_reasoning;                                   // this window's accumulated reasoning_content
+  // this window's accumulated per-step tool_calls fragments (the gradual tool_calls the carried parser
+  // forwards, folded in each delta); at emit they are MERGED per call-index into one entry per call
+  // (name / arguments accumulated within it) -- not dumped as one array element per fragment (see
+  // MergeToolCallFragments in the .cpp, invoked by emitAggregate)
+  ov::genai::JsonContainer m_buf_tools;
+  // Build one emitted line from the current window's buffers (omitting empty keys, in the original
+  // content -> reasoning_content -> tool_calls order so N==1 is byte-identical to the per-token line),
+  // then reset the buffers + the per-window counter.  Called both from write() (the N>=1 window
+  // boundary) and from end() (the final chunk, or the whole total for N<=0).
+  void emitAggregate();
 };
 
 // A runtime on/off on the reasoning splitter, NOT a compose-time gate: one DynamicReasoningIncrementalParser

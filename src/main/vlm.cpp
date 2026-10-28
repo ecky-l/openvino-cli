@@ -679,6 +679,11 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
   // extra_context) AND the parser (the dynamic reasoner's setActive) -- both from this one value.
   const auto effThinking = resolveEffectiveThinking(pr, reqConfig);
   const bool thinking = effThinking.has_value() ? *effThinking : false;
+  // The --stream N token-aggregation size (default 1 = today's one line per token; >1 = N tokens per
+  // line; <=0 = no mid-stream output, one total line at the end).  Resolved once here and shared by
+  // BOTH generate branches (so the pre-apply and the engine path can never disagree), exactly like
+  // `thinking`; it is carried into the engine via ContentStreamer::instance().
+  const int stream = reqConfig.stream.value_or(1);
   bool useEngineTemplate = !(pr.hasTools || pr.hasKwargs);   // the (tools|kwargs) sub-rule
 
   // (b) Resolve the model family for this request: an explicit --model-family
@@ -754,7 +759,7 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
     // ContentStreamer runs over the list; the base TextParserStreamer fills content when the reasoner is
     // inactive (a no-think model).
     std::string acc;
-    auto streamer = ::ovgenai::toolcall::ContentStreamer::instance(tokenizer, modelFamily.value_or(std::string()), thinking, acc);
+    auto streamer = ::ovgenai::toolcall::ContentStreamer::instance(tokenizer, modelFamily.value_or(std::string()), thinking, acc, stream);
     auto res = pipe.generate(rendered, pr.images, cfg, ov::genai::StreamerVariant(streamer));
     // (b) BRIDGE: the folded parse never reaches res.parsed on its own.  Only the LLM pipeline's
     // run_generate_with_parsers copies a TextParserStreamer's get_parsed_message() into res.parsed[0];
@@ -794,7 +799,7 @@ int executeRequest(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
   // just gets its content (the original good behaviour).  A real thinking model is opted in via the flag,
   // which routes the request to the pre-apply branch.  No auto-detect from the render.
   std::string acc;
-  auto streamer = ::ovgenai::toolcall::ContentStreamer::instance(tokenizer, modelFamily.value_or(std::string()), thinking, acc);
+  auto streamer = ::ovgenai::toolcall::ContentStreamer::instance(tokenizer, modelFamily.value_or(std::string()), thinking, acc, stream);
   auto res = pipe.generate(history, pr.images, pr.videos, pr.audios, {}, cfg,
                            ov::genai::StreamerVariant(streamer));
   ::ovgenai::toolcall::bridgeParsedMessage(streamer, res);
