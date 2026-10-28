@@ -255,15 +255,19 @@ void Qwen35ToolCallParser::machine(std::vector<std::string>& out, bool atEnd) {
       m_value_started = false;
       m_pending_newline = false;
       m_state = State::PARAM;
-      // The reference does two fragments here: `json.dumps(param_name)` (a QUOTED key) then a
-      // lone '"' that opens the value string -- quoting the key is mandatory (a bare name would
-      // give `{city: ...`, invalid JSON).  Then `: ` + the opening quote of the value.
+      // The parameter's argument opens with ONE fragment: the "{" / ", " separator, a QUOTED key
+      // (a bare name would give `city: ` with no surrounding quotes -> invalid JSON), then ": " plus
+      // the value's OPEN quote -- i.e. the whole `{"city": "` in a single fragment.  The open quote
+      // thus lives inside this fragment exactly once.
+      // The reference qwen35.py emits the same thing in two pieces -- `{"city": ` (ending in a space)
+      // and a lone `'` -- then appends BOTH to the buffer in one _frag call; here that pair is just
+      // FOLDED into this single `{"city": "`.  We must NOT also forward a second lone-`'` fragment:
+      // that re-emits the value's open quote a second time, and reassembling the STREAMED arguments
+      // then produced `{"city": ""London"}` (a doubled open quote -> invalid JSON; the parser-bug.txt
+      // fault, which showed on the streamed tool_calls yet never on the consolidated result).  The
+      // value's CLOSING quote is emitted later, by consumeValue when the parameter value ends.
       const std::string sep = (m_param_index == 0) ? "{" : ", ";
       m_param_index += 1;
-      // The opening-argument fragment `{<key>: "}` (the quoted key + ": " + the value's open quote).
-      // The SAME string is appended to the running buffer AND forwarded as two fragments -- mirrors
-      // QwenXMLToolParser, which _frag's f"{sep}{json.dumps(name)}: " then a lone '"' -- so the streamed
-      // tool_calls (req 2) and the consolidated arguments stay in lock-step.
       const std::string kwarg = sep + "\"" + jsonEscape(m_param_name) + "\": \"";
       m_arguments_buf += kwarg;
       {
@@ -271,14 +275,6 @@ void Qwen35ToolCallParser::machine(std::vector<std::string>& out, bool atEnd) {
         f["index"] = static_cast<std::int64_t>(m_cur_index);
         ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
         ff["arguments"] = kwarg;
-        f["function"] = ff;
-        frag(f);
-      }
-      {
-        ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
-        f["index"] = static_cast<std::int64_t>(m_cur_index);
-        ov::genai::JsonContainer ff = ov::genai::JsonContainer::object();
-        ff["arguments"] = std::string("\"");
         f["function"] = ff;
         frag(f);
       }

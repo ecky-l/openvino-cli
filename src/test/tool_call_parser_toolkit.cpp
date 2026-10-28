@@ -21,6 +21,7 @@
 #include <openvino/genai/json_container.hpp>
 #include <openvino/genai/llm_pipeline.hpp>        // DecodedResults (the engine-side result the bridge fills)
 #include <cstddef>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -303,4 +304,68 @@ TEST(ToolCallSupport, BridgeIsNoOpForPlainStreamer) {
 
   EXPECT_TRUE(res.parsed.empty())               // cast missed -> res.parsed untouched (no spurious tool_calls)
     << "bridge fired for a plain TextStreamer; res.parsed was not left as the engine produced it";
+}
+
+// REGRESSION for parser-bug.txt: the value's OPENING '"' was streamed twice.  The defect lived only
+// in the per-step STREAMED fragment channel -- PARAM_NAME forwarded `{"city": "` (a fragment that
+// already ends on the value's open quote) AND, as a SECOND fragment, a redundant lone `"`, so
+// reassembling the streamed arguments produced `{"city": ""London"}` (a doubled open quote, invalid
+// JSON).  The CONSOLIDATED result the other model-free tests read was already correct, so nothing
+// caught it.  This drives the real state machine through its on_fragment sink (the very stream channel)
+// and reassembles the streamed arguments exactly as a consumer would, so the doubled open quote is
+// proven gone.  (bracket-safety: the tag bytes are the k*/LT/GT consts; the argument text below,
+// e.g. the literal `{"city": "London"}`, carries no angle-bracket tag pair -- so it is safe here.)
+TEST(ToolCallSupport, StreamedArgumentsReassembleNoDoubledOpenQuote) {
+  Qwen35ToolCallParser p;                       // driven directly (the model-free path); sink wired below
+  Qwen35BoundarySynthesizer s;
+
+  // Capture every fragment the parser forwards through its on_fragment sink (a null sink would no-op).
+  std::vector<ov::genai::JsonContainer> frags;
+  p.setOnFragment([&frags](const ov::genai::JsonContainer& f) { frags.push_back(f); });
+
+  // A complete single call (the blockForCall shape mirrors the model's own template).
+  runSynth(p, s, blockForCall("get_weather", {{"city", "London"}}));                  // drive the parser; the sink fills frags + completed_calls
+
+  // Reassemble each call's arguments from the streamed fragments, in stream order -- the OpenAI
+  // streaming contract: a {index, function:{arguments:FRAG}} appends FRAG to that call's arguments.
+  std::map<int64_t, std::string> reassembled;
+  for (const auto& f : frags) {
+    if (!f.contains("function")) continue;                    // id-only / name-only fragments carry no arguments
+    const ov::genai::JsonContainer& fn = f["function"];
+    if (!fn.contains("arguments")) continue;
+    std::int64_t idx = 0;
+    if (f.contains("index")) { if (auto iv = f["index"].as_int()) idx = *iv; }
+    reassembled[idx] += fn["arguments"].as_string().value_or(std::string());
+  }
+
+  ASSERT_TRUE(reassembled.count(0)) << "no streamed arguments were collected for call 0";
+  const std::string joined = reassembled[0];
+
+  // (1) the bug's signature: a doubled open quote.  A correct `{"city": "London"}` carries no two
+  //     adjacent '"'; the old double-emit left `{"city": ""London"}` (which does) -> this fails on it.
+  EXPECT_EQ(joined.find("\"\""), std::string::npos)
+    << "streamed arguments re-assemble with a doubled open quote: " << joined;
+
+  // (2) the reassembled arguments re-parse to valid JSON and carry city=London -- argCity() re-parses
+  //     and returns nullopt on a parse throw, so it fails cleanly on the doubled-quote string.
+  ov::genai::JsonContainer call = ov::genai::JsonContainer::object();
+  ov::genai::JsonContainer fn   = ov::genai::JsonContainer::object();
+  fn["arguments"] = joined;
+  call["function"] = fn;
+  ASSERT_TRUE(argCity(call).has_value())
+    << "re-assembled streamed arguments are not valid JSON: " << joined;
+  EXPECT_EQ(argCity(call).value_or(std::string()), std::string("London"));
+
+  // (3) the streamed channel now AGREES with the consolidated one (they used to diverge: the consolidated
+  //     was correct, the stream doubled the open quote).  The consolidated is read from
+  //     p.completed_calls() -- the same source the real bridge reads -- NOT from the drained buffer:
+  //     wiring a non-null sink deliberately stops emitToolCalls from writing delta_message (a 2nd call
+  //     re-setting an array key would throw the base concatenate), so a sinked run's buffer has no
+  //     tool_calls while the consolidated stays fully populated.
+  ASSERT_FALSE(p.completed_calls().empty())
+    << "the parser produced no completed call to compare the streamed channel against";
+  const std::string consolidatedCity = argCity(p.completed_calls()[0]).value_or(std::string());
+  EXPECT_EQ(consolidatedCity, argCity(call).value_or(std::string()))
+    << "the streamed reassembly and the consolidated call disagree";
+  EXPECT_EQ(consolidatedCity, std::string("London"));
 }
