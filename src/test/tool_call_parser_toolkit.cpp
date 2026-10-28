@@ -369,3 +369,151 @@ TEST(ToolCallSupport, StreamedArgumentsReassembleNoDoubledOpenQuote) {
     << "the streamed reassembly and the consolidated call disagree";
   EXPECT_EQ(consolidatedCity, std::string("London"));
 }
+
+// mergeToolCallFragments is now the single GENERALISED consumer of a window's raw per-step tool_calls
+// fragments: it keys on the OpenAI Chat Completions `type` ( "function" and "custom" today; the file-local
+// kToolCallTypes table is the extension point for the later Responses-API members).  These tests drive it
+// MODEL-FREE -- they feed a synthetic fragment sequence (what a --stream N window would hold) and assert the
+// merged per-call shape -- so the generalization is provable without a live model emitting that type.
+//
+// A "function" call (the user's get_weather example, --stream 3) must fold to ONE entry per call, the name
+// (last non-empty) and the argument (concatenated) WITHIN that one entry, carrying the id + type -- and the
+// key regression guard: a value/name-ONLY window (no top-level `type`, as when a window falls BETWEEN two
+// calls) must still emit { index, function:{...} } but must NOT gain a top-level `type` (this is why the
+// generalization resolves the sub-object from the fragment's `function:` key, not from a top-level `type`
+// the fragment never carried).
+TEST(ToolCallSupport, MergeKeepsFunctionStreamedShape) {
+  ov::genai::JsonContainer frags = ov::genai::JsonContainer::array();
+  // {call-open}: index + id + type + function:{ name:"", arguments:"" }
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = std::int64_t{0};
+    f["id"]    = std::string("call_0");
+    f["type"]  = std::string("function");
+    ov::genai::JsonContainer fn = ov::genai::JsonContainer::object();
+    fn["name"]      = std::string("");
+    fn["arguments"] = std::string("");
+    f["function"] = fn;
+    frags.push_back(f);
+  }
+  // {name} delta: index + function:{ name }
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = std::int64_t{0};
+    ov::genai::JsonContainer fn = ov::genai::JsonContainer::object();
+    fn["name"] = std::string("get_weather");
+    f["function"] = fn;
+    frags.push_back(f);
+  }
+  // {argument} delta: index + function:{ arguments }
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = std::int64_t{0};
+    ov::genai::JsonContainer fn = ov::genai::JsonContainer::object();
+    fn["arguments"] = std::string("{\"city\":\"London\"}");
+    f["function"] = fn;
+    frags.push_back(f);
+  }
+  const ov::genai::JsonContainer merged = mergeToolCallFragments(frags);
+  ASSERT_TRUE(merged.is_array());
+  ASSERT_EQ(merged.size(), std::size_t{1}) << merged.to_json_string();
+  const ov::genai::JsonContainer e = merged[0];
+  EXPECT_EQ(e["index"].as_int().value_or(std::int64_t{-1}), std::int64_t{0});
+  EXPECT_TRUE(e.contains("id"));
+  EXPECT_EQ(e["id"].as_string().value_or(std::string()), std::string("call_0"));
+  EXPECT_TRUE(e.contains("type"));
+  EXPECT_EQ(e["type"].as_string().value_or(std::string()), std::string("function"));
+  ASSERT_TRUE(e.contains("function"));
+  const ov::genai::JsonContainer fn = e["function"];
+  ASSERT_TRUE(fn.contains("name"));               // the {call-open}'s presence keeps the key (even empty)
+  EXPECT_EQ(fn["name"].as_string().value_or(std::string()), std::string("get_weather"));   // last non-empty wins
+  ASSERT_TRUE(fn.contains("arguments"));
+  EXPECT_EQ(fn["arguments"].as_string().value_or(std::string()), std::string("{\"city\":\"London\"}"));
+}
+
+// The generalization landed: a "custom" tool call (the OTHER OpenAI Chat Completions union member).  Its
+// sub-object is `custom` (not `function`) and its value key is `input` (the FREE-FORM string the model
+// generated -- NOT a JSON payload like `function.arguments`).  The same machine, keyed on `type`, rebuilds
+// these four deltas into ONE entry:
+//   final  : {"index":0,"id":"call_c","type":"custom","custom":{"name":"get_weather","input":"weather in London"}}
+//   deltas : {index:0, id:call_c, type:custom, custom:{name:"",input:""}}   (the {call-open})
+//            {index:0, custom:{name:"get_weather"}}
+//            {index:0, custom:{input:"weather in"}}   {index:0, custom:{input:" London"}}
+TEST(ToolCallSupport, MergeHandlesCustomToolType) {
+  ov::genai::JsonContainer frags = ov::genai::JsonContainer::array();
+  // {call-open}: index + id + type:"custom" + custom:{ name:"", input:"" }
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = std::int64_t{0};
+    f["id"]    = std::string("call_c");
+    f["type"]  = std::string("custom");
+    ov::genai::JsonContainer cd = ov::genai::JsonContainer::object();
+    cd["name"]  = std::string("");
+    cd["input"] = std::string("");
+    f["custom"] = cd;
+    frags.push_back(f);
+  }
+  // {name} delta: index + custom:{ name }
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = std::int64_t{0};
+    ov::genai::JsonContainer cd = ov::genai::JsonContainer::object();
+    cd["name"] = std::string("get_weather");
+    f["custom"] = cd;
+    frags.push_back(f);
+  }
+  // {input} x2: the free-form input streamed in fragments, concatenated
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = std::int64_t{0};
+    ov::genai::JsonContainer cd = ov::genai::JsonContainer::object();
+    cd["input"] = std::string("weather in");
+    f["custom"] = cd;
+    frags.push_back(f);
+  }
+  {
+    ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+    f["index"] = std::int64_t{0};
+    ov::genai::JsonContainer cd = ov::genai::JsonContainer::object();
+    cd["input"] = std::string(" London");
+    f["custom"] = cd;
+    frags.push_back(f);
+  }
+  const ov::genai::JsonContainer merged = mergeToolCallFragments(frags);
+  ASSERT_TRUE(merged.is_array());
+  ASSERT_EQ(merged.size(), std::size_t{1}) << merged.to_json_string();
+  const ov::genai::JsonContainer e = merged[0];
+  EXPECT_EQ(e["index"].as_int().value_or(std::int64_t{-1}), std::int64_t{0});
+  EXPECT_TRUE(e.contains("id"));
+  EXPECT_EQ(e["id"].as_string().value_or(std::string()), std::string("call_c"));
+  EXPECT_TRUE(e.contains("type"));
+  EXPECT_EQ(e["type"].as_string().value_or(std::string()), std::string("custom"));
+  ASSERT_TRUE(e.contains("custom"));
+  EXPECT_FALSE(e.contains("function")) << "a custom call must not also carry a function sub-object";
+  const ov::genai::JsonContainer cd = e["custom"];
+  ASSERT_TRUE(cd.contains("name"));
+  EXPECT_EQ(cd["name"].as_string().value_or(std::string()), std::string("get_weather"));
+  ASSERT_TRUE(cd.contains("input"));
+  EXPECT_EQ(cd["input"].as_string().value_or(std::string()), std::string("weather in London"));
+}
+
+// Regression guard, symmetric with the function case: a `custom` value/name-only window (NO top-level
+// `type`/`id`, as when a window falls between calls) must still emit { index, custom:{...} } but must NOT
+// gain a top-level `type` -- the sub-object is resolved from the fragment's `custom:` key.
+TEST(ToolCallSupport, MergeCustomValueOnlyWindowHasNoType) {
+  ov::genai::JsonContainer frags = ov::genai::JsonContainer::array();
+  ov::genai::JsonContainer f = ov::genai::JsonContainer::object();
+  f["index"] = std::int64_t{0};
+  ov::genai::JsonContainer cd = ov::genai::JsonContainer::object();
+  cd["input"] = std::string("lon");
+  f["custom"] = cd;
+  frags.push_back(f);
+
+  const ov::genai::JsonContainer merged = mergeToolCallFragments(frags);
+  ASSERT_EQ(merged.size(), std::size_t{1});
+  const ov::genai::JsonContainer e = merged[0];
+  EXPECT_EQ(e["index"].as_int().value_or(std::int64_t{-1}), std::int64_t{0});
+  EXPECT_FALSE(e.contains("type")) << "a custom value-only window must not gain a top-level type";
+  EXPECT_FALSE(e.contains("id"))   << "a custom value-only window must not gain a top-level id";
+  ASSERT_TRUE(e.contains("custom"));
+}

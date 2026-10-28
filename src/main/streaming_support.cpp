@@ -6,6 +6,8 @@
 #include "streaming_support.hpp"
 #include <cstdio>                       // fputs / fputc / fflush -- the per-chunk JSON emit the ContentStreamer does
 #include <map>                          // mergeToolCallFragments: per-call-index accumulator for the emitted tool_calls
+#include <vector>                       // mergeToolCallFragments: the kToolCallTypes table (one row per `type`)
+#include <initializer_list>            // the ToolCallType ctor builds a row's sub-key list
 #include <openvino/genai/llm_pipeline.hpp>       // DecodedResults (full type; the bridge target)
 
 namespace ovgenai {
@@ -264,44 +266,95 @@ ov::genai::StreamingStatus ContentStreamer::write(ov::genai::JsonContainer& mess
 // --- merge a window's raw per-step tool_call fragments into the MEANINGFUL per-call array a line carries
 //
 // The per-step fragments the carried parser forwards (via on_fragment -> collectFragment -> m_buf_tools)
-// are each the OpenAI shape { index, [id, type] function:{ [name] , [arguments] } } : a {call-open}
-// fragment is { index, id, type, function:{ name:"" , arguments:"" } }, a {function-name} fragment is
-// { index, function:{ name } }, and the argument / {}} fragments are { index, function:{ arguments } }.
-// Today's emit dumped ALL of them as separate array elements (one per token), which is NOT what a
-// --stream N line should be.  This rebuilds them so ONE emitted line carries ONE entry per call index
-// seen in the window (in first-seen order), with the call's name / arguments ACCUMULATED WITHIN that one
-// entry -- exactly the OpenAI streaming contract applied per window.  Consequences, all from ONE rule:
-//   * a single-fragment window (N==1) reproduces that fragment VERBATIM, so --stream 1 stays byte-identical
-//     to before (the {call-open}'s empty name/arguments keys are preserved because the fragment still carries
-//     them);
-//   * a 3-fragment window (--stream 3) yields one entry per call, e.g. { index, id, type,
-//     function:{ name:<the name> , arguments:<the 3 concat'd argument fragments> } } -- the user's example;
-//   * the WHOLE stream is one window for N<=0, so this yields the fully-consolidated array, exactly what
-//     the parser's completed_calls() (the res.parsed[0] bridge) produces -- "the whole aggregate".
-// Merge rules per call index (the qwen35 parser always carries function.{name,arguments} on every fragment,
-// so a key's PRESENCE — not a non-empty value — drives whether it is emitted, which keeps the verbatim N==1
-// shape): name = the last NON-EMPTY function.name seen (the {call-open}'s "" is skipped, but its PRESENCE
-// still emits an empty name key when no real name arrived); arguments = the CONCATENATION of every
-// function.arguments seen (the same m_arguments_buf the parser builds); id / type (top-level) are carried
-// from whichever fragment set them (the {call-open}'s id / type).
-static ov::genai::JsonContainer mergeToolCallFragments(const ov::genai::JsonContainer& fragments) {
+// are per-call-index OpenAI Chat Completions `tool_calls[]` DELTAS (NOT the consolidated array).  For a
+// "function" call a {call-open} is { index, id, type:"function", function:{ name:"", arguments:"" } }, a
+// {name} delta is { index, function:{ name } }, and the value / {}} deltas are { index, function:{
+// arguments } }.  The "custom" member is the same shape with `custom` for `function` and `input` for
+// `arguments` (see kToolCallTypes).  Today's emit dumped ALL of them as separate array elements (one per
+// token) -- NOT what a --stream N line is.  This rebuilds them so one emitted line carries ONE entry per
+// call index seen in the window (first-seen order), with each call's sub-keys ACCUMULATED WITHIN that one
+// entry -- the OpenAI streaming contract applied per window.  All three consequences follow from ONE rule
+// (a sub-key's PRESENCE, not a non-empty value, drives whether it is emitted):
+//   * a single-fragment window (N==1) reproduces that fragment VERBATIM, so --stream 1 stays byte-identical;
+//   * a 3-fragment window (--stream 3) yields one entry per call: name (last non-empty) + the 3 concatenated
+//     value fragments -- the user's get_weather example;
+//   * the WHOLE stream is one window for N at most 0, giving the fully-consolidated array ("the whole aggregate").
+//
+// GENERALISED over the call `type`.  The OpenAI Chat Completions `tool_calls[]` is a UNION discriminated by
+// the top-level `type` field; the sub-object name == that type value (the OpenAI convention), and the
+// sub-keys it nests differ per member:
+//   type "function" -> sub-object "function" : { name, arguments }  (arguments is a JSON string)
+//   type "custom"   -> sub-object "custom"   : { name, input }      (input is the free-form model input)
+// The merge keys on `type` (NOT a hard-coded "function" sub-key): the kToolCallTypes table below is the
+// SINGLE extension point -- add one row there when the OpenAI RESPONSES-API members arrive (deferred per
+// the user).  Two rules keep it correct and byte-stable:
+//   1. the SUB-OBJECT is resolved from the fragment (a matching table row for its top-level `type`, else
+//      the first KNOWN sub-object the fragment actually carries) -- a value / name-only delta carries NO
+//      top-level `type`, so this is what makes an N above 1 value-only window still emit its
+//      { index, function:{...} } entry rather than nothing;
+//   2. a top-level `type` / `id` is EMITTED only when a fragment literally carries it -- a value / name-only
+//      delta has neither, so it adds no top-level `type` / `id` (exactly today's per-delta shape, N==1
+//      byte-identical).  A `type` not in the table is carried gracefully: its index / id / type survive
+//      (rule 2) but its sub-object is not reconstructed (JsonContainer offers no key iterator) until a row
+//      is added for it.
+//
+// A WORKED "custom" example the merge rebuilds (the requested example; an N==4 window, 4 deltas folding to
+// ONE line -- see MergeHandlesCustomToolType, which asserts exactly this):
+//   final  : {"index":0,"id":"call_c","type":"custom","custom":{"name":"get_weather","input":"weather in London"}}
+//   deltas : {"index":0,"id":"call_c","type":"custom","custom":{"name":"","input":""}}   (the {call-open})
+//            {"index":0,"custom":{"name":"get_weather"}}   {"index":0,"custom":{"input":"weather in"}}
+//            {"index":0,"custom":{"input":" London"}}
+// (A "custom" `input` is the FREE-FORM string the model generated -- not a JSON payload like `function.arguments`.)
+//
+// A forward-declared (non-static) free function so it is unit-testable model-free with a synthetic fragment
+// sequence per `type` (declared in streaming_support.hpp), not only through a live qwen35 model that only
+// emits "function" fragments.
+struct ToolCallType {
+  const char*               type;    // the discriminator: the top-level "type" field
+  const char*               subObj;  // the sub-object name it nests under (== the type value, the OpenAI convention)
+  std::vector<std::string>  subKeys; // sub-keys to accumulate, in EMIT order (the 1st == "name", the rest concatenated)
+  ToolCallType(const char* t, const char* s, std::initializer_list<const char*> k)
+    : type(t), subObj(s) { for (const char* c : k) subKeys.emplace_back(c); }
+};
+// The Chat Completions union members we support now (function + custom).  THE extension point: add a row
+// here per Responses-API member (its sub-object name + its ordered subKeys) and the merge handles it
+// unchanged -- that is what "support completions first, responses later" means concretely.
+static const std::vector<ToolCallType> kToolCallTypes = {
+  ToolCallType("function", "function", { "name", "arguments" }),
+  ToolCallType("custom",   "custom",   { "name", "input"     }),
+};
+// The table row for a `type` value; nullptr for a `type` not yet in the table (handled gracefully).
+static const ToolCallType* findToolType(const std::string& type) {
+  for (const auto& t : kToolCallTypes)
+    if (type == t.type) return &t;
+  return nullptr;
+}
+// A public helper (see the forward-declared prototype in streaming_support.hpp): fold a window's raw
+// per-step tool_call fragments (each the OpenAI streaming-delta shape) into the meaningful per-call array
+// a line carries -- one entry per call index, the call's sub-keys accumulated WITHIN it (name last-
+// non-empty; the rest concatenated).
+ov::genai::JsonContainer mergeToolCallFragments(const ov::genai::JsonContainer& fragments) {
   if (!fragments.is_array() || fragments.empty())
-    return ov::genai::JsonContainer::array();   // nothing to merge (a content/reasoning-only delta or an all-empty window)
-  // Per-call accumulator (one per index); the {call-open} sets id/type/{name:arguments} and later fragments
-  // extend the name (last non-empty) / arguments (concatenation).  `order` keeps first-seen index order.
+    return ov::genai::JsonContainer::array();   // nothing to merge (a content / reasoning-only delta or an all-empty window)
+  // Per-call accumulator (one per index); a {call-open} sets id / type / { name, value } and later deltas
+  // extend the name (last non-empty) / value (concatenation).  `row` + `subObj` remember WHICH table row /
+  // sub-object this cell is (set from the {call-open}, re-derived per fragment for an N>1 value-only
+  // window); `subKeys` holds one Field per sub-key (presence tracked).  `order` keeps first-seen order.
+  struct Field { bool seen = false; std::string value; };
   struct Acc {
-    bool        saw_name = false;   std::string name;       // function.name : key emitted iff seen; last non-empty wins
-    bool        saw_args = false;   std::string arguments;  // function.arguments : key emitted iff seen; concatenation
-    bool        saw_id   = false;   std::string id;         // top-level id   : carried from the {call-open}
-    bool        saw_type = false;   std::string type;       // top-level type : carried from the {call-open}
+    bool                saw_id   = false; std::string id;          // top-level id   (carried from the {call-open})
+    bool                saw_type = false; std::string type;        // top-level type (carried from the {call-open})
+    const ToolCallType* row      = nullptr;                        // the table row resolved for this cell
+    std::string         subObj;                                    // the sub-object name to nest the sub under
+    std::map<std::string, Field> subKeys;                           // sub-key name -> presence + accumulated value
   };
   std::vector<std::int64_t> order;
   std::map<std::int64_t, Acc> acc;
   for (size_t i = 0; i < fragments.size(); ++i) {
-    const ov::genai::JsonContainer& f = fragments[i];   // one raw per-step fragment = an OpenAI-shaped object
+    const ov::genai::JsonContainer& f = fragments[i];   // one raw per-step delta = an OpenAI-shaped object
     if (!f.is_object())
-      continue;                                         // a non-object fragment carries no structured call data
-    // The index a fragment lands under (every qwen35 fragment carries it; a missing key just defaults to 0).
+      continue;                                         // a non-object delta carries no structured call data
+    // The index a fragment lands under (every fragment carries it; a missing key just defaults to 0).
     std::int64_t idx = 0;
     if (f.contains("index"))
       if (auto v = f["index"].as_int()) idx = *v;
@@ -310,26 +363,53 @@ static ov::genai::JsonContainer mergeToolCallFragments(const ov::genai::JsonCont
     if (isNew)
       order.push_back(idx);
     if (f.contains("id"))
-      a.saw_id = true,   a.id   = f["id"].as_string().value_or(std::string());
+      a.saw_id = true, a.id = f["id"].as_string().value_or(std::string());
     if (f.contains("type"))
       a.saw_type = true, a.type = f["type"].as_string().value_or(std::string());
-    if (f.contains("function")) {
-      const ov::genai::JsonContainer& fn = f["function"];
-      if (fn.is_object()) {
-        if (fn.contains("name")) {                      // last non-empty name wins; bare {call-open}'s "" is skipped
-          a.saw_name = true;
-          if (const std::string nm = fn["name"].as_string().value_or(std::string()); !nm.empty())
-            a.name = nm;
-        }
-        if (fn.contains("arguments")) {                 // concatenate (the reference contract the parser itself uses)
-          a.saw_args = true;
-          a.arguments += fn["arguments"].as_string().value_or(std::string());
-        }
+    // Resolve the sub-object THIS fragment populates (independent of whether a top-level `type` is present:
+    // a value / name-only delta carries only the sub-object, not a `type`) -- the generalization of the old
+    // hard-coded "function" lookup: prefer a table row for the top-level type, else the first KNOWN
+    // sub-object the fragment carries, else (an unknown type) the OpenAI convention sub-object == type.
+    std::string subObjName;
+    const ToolCallType* rt = findToolType(a.saw_type ? a.type : std::string());
+    if (rt) {
+      subObjName = rt->subObj;
+      if (!a.row) a.row = rt;
+    } else if (!a.type.empty() && f.contains(a.type)) {
+      // an unknown `type` (a future Responses-API member) whose sub-object follows the "== type" convention
+      subObjName = a.type;
+      if (a.subObj.empty()) a.subObj = a.type;
+    } else {
+      for (const auto& t : kToolCallTypes)             // no top-level `type` on this fragment (a value / name-only
+        if (f.contains(t.subObj)) { subObjName = t.subObj; if (!a.row) a.row = &t; rt = &t; break; }  // delta): resolve
+      // the row from the sub-object it actually carries; that SAME row (rt) then drives the accumulation,
+      // so a value / name-only window still gets its type's value sub-key (arguments / input), not nothing.
+    }
+    if (a.subObj.empty() && !subObjName.empty())
+      a.subObj = subObjName;                           // remember the sub-object for materialisation (first-seen)
+    if (subObjName.empty() || !f.contains(subObjName))
+      continue;                                        // this delta carries no sub-object -> id / type already handled
+    const ov::genai::JsonContainer& sub = f[subObjName];
+    if (!sub.is_object())
+      continue;
+    if (rt) {                                          // KNOWN type: accumulate the table'd sub-keys (1st == name)
+      for (const std::string& sk : rt->subKeys) {
+        if (!sub.contains(sk)) continue;
+        Field& ff = a.subKeys[sk];                    // default Field (unseen) is created, then marked seen
+        ff.seen = true;
+        const std::string v = sub[sk].as_string().value_or(std::string());
+        if (sk == "name") { if (!v.empty()) ff.value = v; }   // name slot: last non-empty wins (skip the open's "")
+        else ff.value += v;                                          // value slot s: concatenation
       }
+    } else if (sub.contains("name")) {                 // UNKNOWN type: best-effort carry just the shared "name"
+      Field& ff = a.subKeys["name"];
+      ff.seen = true;
+      const std::string v = sub["name"].as_string().value_or(std::string());
+      if (!v.empty()) ff.value = v;
     }
   }
-  // Materialise one entry per index (first-seen order), emulating the original key order
-  // index -> id -> type -> function:{ name , arguments } (matching how the parser builds a call).
+  // Materialise one entry per index (first-seen order), in the OpenAI key order
+  // index -> id -> type -> the sub-object (its own sub-keys, in table / first-seen order).
   ov::genai::JsonContainer out = ov::genai::JsonContainer::array();
   for (std::int64_t idx : order) {
     const Acc& a = acc[idx];
@@ -337,13 +417,23 @@ static ov::genai::JsonContainer mergeToolCallFragments(const ov::genai::JsonCont
     entry["index"] = idx;                              // every entry carries its index (the {call-open}'s)
     if (a.saw_id)   entry["id"]   = a.id;
     if (a.saw_type) entry["type"] = a.type;
-    // the function sub-object is emitted iff any fragment carried a function.* key -- present even for a
-    // bare {call-open} (name / arguments keys, possibly empty) so the per-delta stream's shape is unchanged.
-    if (a.saw_name || a.saw_args) {
-      ov::genai::JsonContainer fn = ov::genai::JsonContainer::object();
-      if (a.saw_name) fn["name"]      = a.name;
-      if (a.saw_args) fn["arguments"] = a.arguments;
-      entry["function"] = fn;
+    // the sub-object is emitted iff any fragment carried one of its sub-keys -- present even for a bare
+    // {call-open} (its sub-keys, possibly empty) so the per-delta stream shape is unchanged (N==1 verbatim).
+    if (!a.subObj.empty()) {
+      bool anyField = false;
+      for (const auto& kv : a.subKeys) if (kv.second.seen) { anyField = true; break; }
+      if (anyField) {
+        ov::genai::JsonContainer sub = ov::genai::JsonContainer::object();
+        if (a.row) {                                                     // KNOWN: emit the table'd sub-keys in order
+          for (const std::string& sk : a.row->subKeys) {
+            auto it = a.subKeys.find(sk);
+            if (it != a.subKeys.end() && it->second.seen) sub[sk] = it->second.value;
+          }
+        } else {                                                         // UNKNOWN: emit whatever was seen (first-seen order)
+          for (const auto& kv : a.subKeys) if (kv.second.seen) sub[kv.first] = kv.second.value;
+        }
+        entry[a.subObj] = sub;
+      }
     }
     out.push_back(entry);
   }

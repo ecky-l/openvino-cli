@@ -83,6 +83,17 @@ std::optional<std::string> detectModelFamily(const ov::genai::Tokenizer& tok);
 // testable: the entry whose `sentinels` are ALL present in `rendered` wins; nullopt if none.
 std::optional<std::string> matchFormat(const std::string& rendered);
 
+// The emitted-line merge: fold a window's raw per-step `tool_calls` fragments (each an OpenAI streaming
+// delta) into the meaningful per-call array a --stream N line carries -- one entry per call index, the
+// call's sub-keys accumulated WITHIN it.  Generalised over the OpenAI Chat Completions `tool_calls` union:
+// the sub-object is keyed on the top-level `type` ( "function" -> function:{ name, arguments }, where
+// arguments is a JSON string ;  "custom" -> custom:{ name, input }, where input is the FREE-FORM model
+// input ) via the file-local kToolCallTypes table -- the SINGLE extension point for the later
+// Responses-API members (deferred, per the user).  Public (not file-local) so it is unit-testable
+// model-free with a synthetic fragment sequence per `type`, not only through a live model that only emits
+// "function".
+ov::genai::JsonContainer mergeToolCallFragments(const ov::genai::JsonContainer& fragments);
+
 // Selection precedence: an explicit --model-family name override wins; else auto-detect
 // from the model's OWN loaded template; else no parser (graceful: no stop, finish_reason
 // stays stop, no tool_calls -- exactly the no-parser default today).
