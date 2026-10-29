@@ -1,6 +1,6 @@
 // ovgenai's subcommand front-end -- the ONE place that owns the command surface.
 //
-// The command surface is now THREE subcommands (it was once one per OpenVINO.GenAI
+// The command surface is now FOUR subcommands (it was once one per OpenVINO.GenAI
 // pipeline, plus a `--worker` flag; both are gone):
 //   * `run`    -- run ONE pipeline one-shot: `ovgenai run --pipeline <p> [model-dir]
 //                 <options>`.  Selecting the pipeline by `--pipeline`/`-p` (a new,
@@ -11,23 +11,27 @@
 //   * `worker` -- run ONE pipeline as the long-lived piped worker that the old
 //                 `--worker` flag selected: `ovgenai worker --pipeline <p> ...`.
 //   * `show-config` -- the helper, kept verbatim from the pre-redesign front-end.
+//   * `show-pipelines` -- the helper that now lists every supported pipeline with a
+//                 one-line explanation; the single place that full table lives (the
+//                 top-level --help and the run / worker --pipeline help just point here).
 //
 // `--pipeline`/`-p` is a *general* parameter: it appears in the `--help` "general"
 // section (the untitled root boost renders first, right where the one-shot `--input`
 // sits) of BOTH `run` and `worker`.  It is REQUIRED (no default) and its description
-// lists every pipeline with a one-line blurb, so the operator sees the whole set
-// where the top-level index used to spell it out.  `--input`/`-i` is a *special*
+// is now a single line pointing at the `show-pipelines` helper, which lists the whole
+// set with a one-line explanation per pipeline (so it is no longer spelled out here).
+// `--input`/`-i` is a *special*
 // parameter of `run` only (the direct one-shot chat); `worker`'s stdin is instead
 // its line-JSON protocol, so it offers no `--input` at all.
 //
 // The reason this is built on boost::program_options is that boost formats a
 // description (the 2nd column) for free -- one auto-aligned, auto-wrapped line
-// per entry -- which is what `ovgenai --help` must show, with the pipelines laid
+// per entry -- which is what `ovgenai --help` must show, with the subcommands laid
 // out by category.  The pipelines are no longer table *entries* (there are just the
-// three subcommands): the canonical name/desc set lives in `canonicalPipelines()`
-// (one source of truth for the `--pipeline` help, the top-level index, the body
-// router, and the tests); a body is bound to a name in the constructor, as the old
-// per-pipeline entry lambdas did.
+// four subcommands): the canonical name/desc set lives in `canonicalPipelines()`
+// (one source of truth for the `show-pipelines` listing, the `--pipeline` help pointer,
+// the top-level index pointer, the body router, and the tests); a body is bound to a
+// name in the constructor, as the old per-pipeline entry lambdas did.
 #ifndef OVGENAI_COMMANDS_HPP
 #define OVGENAI_COMMANDS_HPP
 
@@ -54,8 +58,8 @@ struct Subcommand {
 };
 
 // One OpenVINO.GenAI pipeline the CLI can drive: the operator-facing `--pipeline`
-// token, the one-line blurb (the same text the top-level "Known pipelines" index and
-// the `--pipeline` help line render), and the body that runs it -- a run/worker entry
+// token, the one-line blurb (the text the `show-pipelines` listing renders, one line
+// per pipeline), and the body that runs it -- a run/worker entry
 // that reads `--pipeline` and then forwards to the (unchanged) pipeline body, passing
 // the subcommand-derived mode (worker=false for `run`, true for `worker`).
 struct PipelineSpec {
@@ -64,26 +68,29 @@ struct PipelineSpec {
 };
 
 // The single source of truth for the pipeline set (14 entries, insertion order):
-// the canonical name/desc list every surface reads -- the `--pipeline`/`-p` help
-// (`pipelineListString`), the top-level `ovgenai --help` "Known pipelines" section,
-// and the `pipelineNames()` snapshot test.
+// the canonical name/desc list every listing reads -- the `show-pipelines` body
+// (now the one place the full table renders), the `--pipeline`/`-p` help pointer,
+// the top-level `ovgenai --help` "Known pipelines" pointer, and the `pipelineNames()`
+// snapshot test.
 const std::vector<PipelineSpec>& canonicalPipelines();
 
 // Just the `--pipeline` tokens of `canonicalPipelines()` (a stable snapshot for tests).
 const std::vector<std::string>& pipelineNames();
 
-// The `--pipeline`/`-p` option's description: a one-line-per-pipeline enumeration
-// ("name = <blurb>") boost re-indents under the flags column.  Shared by the
-// `run`/`worker` help -- and reused verbatim by vlm.cpp for its in-body `--pipeline`
-// flag, so the body's parse stays consistent with the help.
-std::string pipelineListString();
+// The `--pipeline`/`-p` option's description: a single line pointing the operator at the
+// `show-pipelines` helper, which lists every pipeline with a one-line explanation (the
+// full table no longer inlines in this --help).  Shared by the `run`/`worker` help --
+// and reused verbatim by vlm.cpp for its in-body `--pipeline` flag, so the body's parse
+// stays consistent with the help.
+std::string pipelineParamDesc();
 
 // The front-end: the registry, the argv dispatch, and the `--help` index.
 class SubcommandTable {
  public:
   SubcommandTable();
 
-  // The full subcommand table, insertion order (run, worker, then the helper).
+  // The full subcommand table, insertion order (run, worker, then the two helpers
+  // show-config / show-pipelines).
   const std::vector<Subcommand>& entries() const;
 
   // `ovgenai`'s whole body:
@@ -95,8 +102,9 @@ class SubcommandTable {
   int dispatch(const std::string& /*prog*/, const std::vector<std::string>& /*args*/) const;
 
   // `ovgenai --help`'s index: an intro + a USAGE header, a "Commands" section
-  // (run / worker), a "Known pipelines (select with --pipeline)" section (the full
-  // 14, one line each), a "Helper subcommands" section (show-config), and examples.
+  // (run / worker), a "Known pipelines" line that just points at `show-pipelines`
+  // (the full 14 no longer inline), a "Helper subcommands" section
+  // (show-config + show-pipelines), and examples.
   std::string usage(const std::string& /*prog*/) const;
 
  private:

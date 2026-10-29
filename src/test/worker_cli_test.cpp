@@ -100,6 +100,18 @@ TEST(vcli_worker, subcommandHelpExitsZero) {
   EXPECT_NE(out.find("--device"), std::string::npos);
 }
 
+TEST(vcli_worker, showPipelinesExitsZeroWithoutModel) {
+  if (!ovgenaiRuns()) GTEST_SKIP() << "ovgenai not runnable here (needs `eval $(./setupenv.sh)`)";
+  std::string out, err;
+  // A helper: a bare `show-pipelines` is the one place the full pipeline table is
+  // printed; it loads no model, so it lists every pipeline (name + blurb) and its
+  // --help needs neither --model nor --device.
+  EXPECT_EQ(runOvgenai({"show-pipelines"}, &out, &err), 0);
+  EXPECT_NE(out.find("LLMPipeline"), std::string::npos);
+  EXPECT_NE(out.find("VLMPipeline"), std::string::npos);
+  EXPECT_EQ(runOvgenai({"show-pipelines", "--help"}, &out, &err), 0);
+}
+
 TEST(vcli_worker, showConfigPrintsResolvedJson) {
   if (!ovgenaiRuns()) GTEST_SKIP() << "ovgenai not runnable here (needs `eval $(./setupenv.sh)`)";
   std::string out, err;

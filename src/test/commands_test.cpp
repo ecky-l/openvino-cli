@@ -1,11 +1,13 @@
 // Unit tests for ovgenai's subcommand front-end (src/main/commands.{hpp,cpp}) --
-// the new surface this build phase introduced: three subcommands (run / worker /
-// show-config) where the pipeline is now a required, *general* parameter shared by
+// the new surface this build phase introduced: four subcommands (run / worker / the
+// show-config / show-pipelines helpers) where the pipeline is now a required, *general*
+// parameter shared by
 // both run and worker -- --pipeline/-p -- replacing the old "one subcommand per
 // pipeline" table and the per-subcommand --worker flag.  The pipeline set (14
 // OpenVINO.GenAI C++ pipelines) is now a list the --pipeline option takes; `run`
 // runs the selected pipeline one-shot, `worker` runs it as the long-lived piped
-// worker, and `show-config` prints the resolved config and loads nothing.
+// worker, `show-config` prints the resolved config, and `show-pipelines` lists every
+// supported pipeline -- neither of the two helpers loads a model.
 //
 // Covered here, at the in-process unit level (the companion black-box layer is
 // worker_cli_test.cpp, which drives the built binary):
@@ -14,16 +16,19 @@
 //     the --pipeline set pinned as a snapshot (via canonicalPipelines()) so a
 //     dropped / added pipeline is caught, and each pipeline spec carries the class
 //     name that backs it (llm -> LLMPipeline, ...);
-//   * the top-level `ovgenai --help` index -- the Commands / Known pipelines /
-//     Helper subcommands sections + USAGE / EXAMPLES framing, every subcommand and
-//     every pipeline named, and the --pipeline / -p selector called out;
+//   * the top-level `ovgenai --help` index -- the Commands / (Known pipelines pointer to
+//     show-pipelines) / Helper subcommands sections + USAGE / EXAMPLES framing, every
+//     subcommand named, the full pipeline table no longer inlined (just pointed at),
+//     and the --pipeline / -p selector called out;
 //   * dispatch() contract -- no args -> 2, help/-h/--help -> 0,
 //     version/--version -> 0, an unknown token -> 2 ("unknown command" on stderr);
 //   * the new --pipeline behaviour -- required (a run / worker without it exits 2),
 //     unknown -> 2 naming it; each known pipeline runs one-shot / worker on the
 //     shared load-model surface (vlm, a real body, is exercised end-to-end by the
-//     companion subprocess test); a run / worker --help offers --pipeline (and run
-//     also --input; worker offers neither); a helper's --help offers neither.
+//     companion subprocess test); a run / worker --help offers --pipeline (now a
+//     pointer to show-pipelines, not the full table -- and run also --input; worker
+//     offers neither); a helper's --help offers neither.  `show-pipelines` itself
+//     lists every pipeline and loads no model.
 //
 // The bodies write to stdout/stderr via C stdio, so each dispatch is run under an
 // in-process fd redirect (dup2 the two stdio streams onto pipes, then drain after
@@ -120,15 +125,15 @@ DispatchResult runDispatch(std::vector<std::string> args) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// The subcommand table's shape: three entries (run / worker / show-config).
+// The subcommand table's shape: four entries (run / worker + show-config / show-pipelines).
 // ---------------------------------------------------------------------------
-TEST(ovgenai_commands, registersRunWorkerAndShowConfig) {
+TEST(ovgenai_commands, registersRunWorkerAndTheTwoHelpers) {
   const std::vector<Subcommand>& e = subcommandTable().entries();
-  // 2 command entries (run / worker) + 1 helper (show-config) = 3 entries.
-  ASSERT_EQ(e.size(), 3u);
+  // 2 command entries (run / worker) + 2 helpers (show-config / show-pipelines) = 4.
+  ASSERT_EQ(e.size(), 4u);
   std::size_t commandCount = 0, helperCount = 0;
   for (const Subcommand& s : e) {
-    if (s.name == "show-config") {
+    if (s.name == "show-config" || s.name == "show-pipelines") {
       ++helperCount;
       EXPECT_EQ(s.category, std::string("helper"));
     } else if (s.name == "run" || s.name == "worker") {
@@ -139,7 +144,7 @@ TEST(ovgenai_commands, registersRunWorkerAndShowConfig) {
     }
   }
   EXPECT_EQ(commandCount, 2u);
-  EXPECT_EQ(helperCount, 1u);
+  EXPECT_EQ(helperCount, 2u);
 }
 
 // Snapshot of the --pipeline set (one entry per OpenVINO.GenAI C++ pipeline): the
@@ -201,9 +206,11 @@ TEST(ovgenai_commands, showConfigIsHelperCategoryAndPipelineCarriesItsClassName)
 }
 
 // ---------------------------------------------------------------------------
-// The top-level `ovgenai --help` index renders its three sections + every entry.
+// The top-level `ovgenai --help` index: the full pipeline table no longer inlines
+// here -- the "Known pipelines" slot now points at the `show-pipelines` helper, so
+// this tests that the index points there *and* does NOT enumerate the pipelines.
 // ---------------------------------------------------------------------------
-TEST(ovgenai_commands, topLevelHelpRendersPipelinesAndSubcommands) {
+TEST(ovgenai_commands, topLevelHelpPointsToShowPipelinesNotTheFullTable) {
   const std::string usage = subcommandTable().usage("ovgenai");
   EXPECT_NE(usage.find("USAGE:"), std::string::npos);
   EXPECT_NE(usage.find("Commands"), std::string::npos);
@@ -213,13 +220,18 @@ TEST(ovgenai_commands, topLevelHelpRendersPipelinesAndSubcommands) {
   // the new --pipeline / -p selector is called out in the index
   EXPECT_NE(usage.find("--pipeline"), std::string::npos);
   EXPECT_NE(usage.find("-p"), std::string::npos);
-  // each subcommand (indent + token) is listed: a dropped one would be missing
+  // the "Known pipelines" slot now points at the show-pipelines subcommand ...
+  EXPECT_NE(usage.find("show-pipelines"), std::string::npos)
+      << "the top-level --help must point at show-pipelines:\n" << usage;
+  // ...and the full per-pipeline table is gone: a blurb (e.g. LLMPipeline) only ever
+  // appears in show-pipelines' own listing, never inlined in the index here.
+  EXPECT_EQ(usage.find("LLMPipeline"), std::string::npos)
+      << "the full pipeline table must no longer be inlined in --help:\n" << usage;
+  // every subcommand (indent + token) is listed, now including show-pipelines.
   EXPECT_NE(usage.find("  run "), std::string::npos);
   EXPECT_NE(usage.find("  worker "), std::string::npos);
   EXPECT_NE(usage.find("  show-config "), std::string::npos);
-  // and every pipeline is listed (a dropped one would be missing from the index)
-  for (const char* p : kPipelineNames)
-    EXPECT_NE(usage.find(p), std::string::npos) << "missing pipeline in --help: " << p;
+  EXPECT_NE(usage.find("  show-pipelines "), std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -295,12 +307,12 @@ TEST(ovgenai_commands, workerOffersNoInputFlagButRunDoes) {
       << "worker --help must not offer --input:\n" << wrk.out;
   DispatchResult run = runDispatch({"run", "--help"});
   ASSERT_EQ(run.rc, 0) << "run --help";
-  // both the general --pipeline and the run-only --input, and the --pipeline blurb
-  // enumerates the pipeline set (so list all pipelines is honoured here)
+  // both the general --pipeline and the run-only --input, and the --pipeline help now
+  // points at show-pipelines (the full table moved there instead of inlining here)
   EXPECT_NE(run.out.find("--pipeline"), std::string::npos) << "run --help offers --pipeline";
   EXPECT_NE(run.out.find("[ --input ]"), std::string::npos) << "run --help offers --input";
-  EXPECT_NE(run.out.find("VLMPipeline"), std::string::npos)
-      << "run --help's --pipeline blurb should list the pipelines: " << run.out;
+  EXPECT_NE(run.out.find("show-pipelines"), std::string::npos)
+      << "run --help's --pipeline help should point at show-pipelines: " << run.out;
 }
 
 // ---------------------------------------------------------------------------
@@ -378,4 +390,28 @@ TEST(ovgenai_commands, showConfigHelpExitsZeroWithoutModelAndWithoutPipelineOrIn
       << "a helper's --help offers no --pipeline option:\n" << r.out;
   EXPECT_EQ(r.out.find("[ --input ]"), std::string::npos)
       << "a helper's --help offers no --input option:\n" << r.out;
+}
+
+// The full pipeline table now lives in the `show-pipelines` helper (it used to inline in
+// the --help): a bare `show-pipelines` is the one place it is listed, and a helper like
+// show-config -- it is a pure reader, so it loads no model and offers neither the
+// run/worker general --pipeline nor the run-only --input.
+TEST(ovgenai_commands, showPipelinesListsEveryPipelineAndExitsZero) {
+  DispatchResult r = runDispatch({"show-pipelines"});
+  ASSERT_EQ(r.rc, 0) << r.err;
+  for (const char* p : kPipelineNames)
+    EXPECT_NE(r.out.find(p), std::string::npos) << "show-pipelines missing pipeline: " << p;
+  // a blurb is rendered per pipeline (the class name that backs it) -- the table body
+  EXPECT_NE(r.out.find("LLMPipeline"), std::string::npos) << r.out;
+}
+
+TEST(ovgenai_commands, showPipelinesHelpOffersNeitherPipelineNorInput) {
+  DispatchResult r = runDispatch({"show-pipelines", "--help"});
+  ASSERT_EQ(r.rc, 0) << r.err;
+  // a helper: needs no --model, and offers neither --pipeline nor --input (match the
+  // bracketed OPTION line, not any prose).
+  EXPECT_EQ(r.out.find("[ --pipeline ]"), std::string::npos)
+      << "show-pipelines offers no --pipeline option:\n" << r.out;
+  EXPECT_EQ(r.out.find("[ --input ]"), std::string::npos)
+      << "show-pipelines offers no --input option:\n" << r.out;
 }

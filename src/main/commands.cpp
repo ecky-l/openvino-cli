@@ -1,6 +1,7 @@
 // ovgenai's subcommand front-end -- the ONE place that owns the command surface.
-// See commands.hpp for the design: three subcommands (run / worker / show-config)
-// instead of a per-pipeline subcommand plus a --worker flag.  The pipeline is now a
+// See commands.hpp for the design: four subcommands -- run / worker / show-config /
+// show-pipelines (it was once one per OpenVINO.GenAI pipeline plus a --worker flag).  The
+// pipeline is now a
 // *general* required parameter, --pipeline/-p, shared by run and worker -- so the
 // same one subcommand drives every OpenVINO.GenAI C++ pipeline (the old per-pipeline
 // subcommands are gone): run picks the one-shot form, worker the long-lived one, and
@@ -11,8 +12,9 @@
 // Each subcommand's own --help is boost-rendered (the general section -- its own
 // root options, --pipeline / [--input] / --help -- boost draws first, the four
 // named config sections after).  The *top-level* `ovgenai --help` index is
-// hand-laid like it was, but now as  Commands (run / worker) / Known pipelines
-// (the full --pipeline set, the one-line blurbs) / Helper subcommands (show-config).
+// hand-laid like it was: Commands (run / worker) / a "Known pipelines" line that now
+// just points at `show-pipelines` (the full table moved there) / Helper subcommands
+// (show-config + show-pipelines).
 #include "commands.hpp"
 
 #include "config.hpp"                    // ConfigError / preProcess / rephraseBoost / joinList
@@ -39,12 +41,14 @@ namespace ovgenai {
 namespace commands {
 
 // --- The canonical pipeline set: the single source of truth every surface reads --
-//   * the --pipeline / -p help (pipelineListString) -- a one-line-per-pipeline list;
+//   * the --pipeline / -p help (pipelineParamDesc) -- now a one-line pointer to the
+//     show-pipelines helper (the full table now lives there, listed in one place);
 //   * `pipelineNames` (a stable snapshot the tests assert);
-//   * the SubcommandTable's top-level "Known pipelines" index;
+//   * the SubcommandTable's top-level "Known pipelines" pointer to show-pipelines;
 //   * the run/worker router (a body is bound to each name in the constructor).
-// Both are non-anonymous (declared in commands.hpp) so vlm.cpp reuses
-// pipelineListString for its own in-body --pipeline flag, keeping the body's parse
+// These are non-anonymous (declared in commands.hpp) so vlm.cpp reuses
+// pipelineParamDesc for its own in-body --pipeline flag (a pointer to show-pipelines,
+// not the full list), keeping the body's parse
 // consistent with the help.  Entry order is the display order.
 const std::vector<PipelineSpec>& canonicalPipelines() {
   static const std::vector<PipelineSpec> p = {
@@ -75,17 +79,17 @@ const std::vector<std::string>& pipelineNames() {
   return n;
 }
 
-// The --pipeline description: an intro line, then one line per pipeline ("name = blurb").
-// Each line is a separate boost description line, so boost re-indents the long
-// wrapped ones under the flags column -- a scannable list, not a wall of text.
-std::string pipelineListString() {
-  // A lead-in line, then one "name = blurb" line per pipeline (a "\n" before each --
-  // no trailing one, so boost re-indents every entry to the flags column yet emits no
-  // blank line after the last).
-  std::string s = "The OpenVINO.GenAI pipeline to run (required, no default). Choose one of:";
-  for (const auto& e : canonicalPipelines())
-    s += "\n" + e.name + " = " + e.description;
-  return s;
+// The --pipeline / -p option's description: a single concise line pointing the operator
+// at the `show-pipelines` helper, which lists every pipeline with a one-line explanation.
+// It no longer enumerates the full table -- that table now lives in `show-pipelines` (so
+// the pipelines show in ONE place, not twice: in this --help and in the top-level index).
+// As a one-liner it needs no "\n" bookkeeping; the caller (generalOptionsDesc below and
+// vlm.cpp) still holds it in a named C-string local passed via .c_str(), because this
+// build's options_description_easy_init has only a (const char* name, value,
+// const char* description) overload -- no (std::string, value, std::string) form.
+std::string pipelineParamDesc() {
+  return "The OpenVINO.GenAI pipeline to run (required). "
+         "Run 'ovgenai show-pipelines' to list and describe the available pipelines.";
 }
 
 namespace {  // file-local front-end helpers
@@ -168,13 +172,13 @@ po::options_description generalOptionsDesc(bool isRunForm) {
   s.add(config::ModelRequestConfig::requestOptionsDesc());
   // The new general parameter: which pipeline this run / worker drives.  Required
   // (no default -- validated by the front-end, which owns the "missing --pipeline"
-  // error), value taken by -p; the help lists every pipeline as one line each
-  // (`pipelineListString`), so the full set is visible right here.  Name / description
-  // are C-strings: this boost build's easy_init only overloads operator() for
-  // (const char* name, value, const char* description) (no std::string variant), so the
-  // std::string from pipelineListString is held in a named local and passed by .c_str()
-  // -- boost copies it inside add_option, so the pointer never dangles.
-  const std::string pipelineDesc = pipelineListString();
+  // error), value taken by -p; its help is now a one-line pointer to `show-pipelines`
+  // (the full pipeline table moved there) -- just a single line, no per-pipeline list.
+  // Name / description are C-strings: this boost build's easy_init only overloads
+  // operator() for (const char* name, value, const char* description) (no std::string
+  // variant), so the std::string from pipelineParamDesc is held in a named local and
+  // passed by .c_str() -- boost copies it inside add_option, so the pointer never dangles.
+  const std::string pipelineDesc = pipelineParamDesc();
   s.add_options()
     ("pipeline,p", po::value<std::string>(), pipelineDesc.c_str());
   if (isRunForm)
@@ -261,6 +265,55 @@ int runShowConfig(const std::string& prog, const std::vector<std::string> args) 
     std::fprintf(stderr, "ovgenai: show-config: %s\n", e.what());
     return 2;
   }
+}
+
+// `show-pipelines`'s --help: it lists the canonical pipeline set and loads nothing, so it
+// offers neither --pipeline nor --input -- it mirrors showConfigHelp's shape (a Usage +
+// prose + only a --help switch).  It is the single place the full pipeline table (every
+// name + its one-line explanation) is now printed; that is why the top-level --help and
+// the run / worker --pipeline help just point here instead of re-spelling it.
+std::string showPipelinesHelp(const std::string& prog) {
+  std::ostringstream os;
+  os << "Usage: " << prog << " show-pipelines\n";
+  os << "  List every OpenVINO.GenAI pipeline this build can run -- "
+     << canonicalPipelines().size() << " of them -- one line each, a short explanation\n";
+  os << "  after every --pipeline token, then exit.  A pure reader: it loads no model, so it\n";
+  os << "  takes no --model / --device (and no --pipeline of its own -- the value 'run' /\n";
+  os << "  'worker' pick is exactly what it prints).  This is the table the 'run' / 'worker'\n";
+  os << "  --pipeline help now points at.\n\n";
+  os << "  Drive a pipeline you pick from the list with:\n";
+  os << "    " << prog << " run    --pipeline <p> [model-dir] <options>   one-shot\n";
+  os << "    " << prog << " worker --pipeline <p> [model-dir] <options>   long-lived worker\n";
+  po::options_description s("", config::kHelpLineLength, config::kHelpMinDescriptionLength);
+  s.add_options()("help", po::bool_switch(), "Show this help message");
+  os << s;
+  return os.str();
+}
+
+// The `show-pipelines` helper body: the single place the full pipeline table renders.
+// A pure reader -- it neither selects a pipeline nor loads a model, so it takes no
+// --model / --device (and no --pipeline): it prints the canonical set (the same source
+// of truth the --pipeline help now points at, instead of inlining) with each pipeline's
+// one-line explanation, then exits 0.  Only its own --help is special; any stray token is
+// ignored (it parses no config, so there is nothing to validate).
+int runShowPipelines(const std::string& prog, const std::vector<std::string> args) {
+  const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the token
+  if (anyHelp(sa)) {
+    std::printf("%s", showPipelinesHelp(prog).c_str());
+    return 0;
+  }
+  std::vector<std::pair<std::string, std::string>> kv;
+  for (const auto& e : canonicalPipelines())
+    kv.push_back({e.name, e.description});
+  std::ostringstream os;
+  os << prog << " -- OpenVINO/GenAI inference CLI: supported pipelines\n\n";
+  os << "  Select a pipeline with --pipeline / -p on " << prog
+     << " run (one-shot) or " << prog
+     << " worker (long-lived), then load a model for it (see " << prog
+     << " show-config).\n\n";
+  renderCategory(os, "--pipeline choices (one OpenVINO.GenAI C++ pipeline each)", kv);
+  std::printf("%s", os.str().c_str());
+  return 0;
 }
 
 // The infrastructure-only body shared by every pipeline that has not yet grown a
@@ -427,12 +480,13 @@ int runModeEntry(const std::string& prog, const std::vector<std::string>& args, 
 
 }  // close the anonymous namespace of this file's front-end helpers
 
-// Build the table: the three real subcommands -- run (one-shot) and worker
-// (long-lived), each routing by the --pipeline value to an unchanged pipeline body,
-// then the show-config helper.  A body is bound to a pipeline name in the per-entry
-// lambda, as the old per-pipeline entries did -- that is the move from "one
-// subcommand per pipeline + a --worker flag" to "run / worker subcommand + a
-// --pipeline parameter".
+// Build the table: the two operator-facing forms -- run (one-shot) and worker
+// (long-lived), each routing by the --pipeline value to an unchanged pipeline body --
+// then the two helpers, show-config (prints the resolved config) and show-pipelines
+// (lists every pipeline with an explanation; the table the --help no longer inlines).
+// A body is bound to a pipeline name in the per-entry lambda, as the old per-pipeline
+// entries did -- that is the move from "one subcommand per pipeline + a --worker
+// flag" to "run / worker subcommand + a --pipeline parameter".
 SubcommandTable::SubcommandTable() {
   m_entries.push_back(Subcommand{
       "run", "command",
@@ -451,11 +505,21 @@ SubcommandTable::SubcommandTable() {
         return runModeEntry(prog, a, /*worker=*/true);
       }});
 
-  // The one operational helper today: `show-config` (no --pipeline / --input /
-  // --worker -- it prints the resolved config and loads nothing).
+  // The first of two helpers: `show-config` (no --pipeline / --input / --worker -- it
+  // prints the resolved config and loads nothing).
   m_entries.push_back(Subcommand{"show-config", "helper",
       "Print the resolved load config as JSON and exit (no model is loaded)",
       &runShowConfig});
+
+  // The second helper: `show-pipelines` -- the single place the full pipeline table (all
+  // 14: name + one-line explanation) is listed; the top-level --help and the run / worker
+  // --pipeline help just point at it instead of re-spelling it.  Like show-config it loads
+  // no model -- it neither selects a pipeline nor is a worker.
+  m_entries.push_back(Subcommand{
+      "show-pipelines", "helper",
+      "List every supported OpenVINO.GenAI pipeline with a one-line explanation "
+      "(loads no model; the table the run/worker --pipeline help points at).",
+      &runShowPipelines});
 }
 
 const std::vector<Subcommand>& SubcommandTable::entries() const {
@@ -494,22 +558,23 @@ std::string SubcommandTable::usage(const std::string& prog) const {
   os << "  " << prog << " version | --version                            print the version and exit\n";
   os << "  " << prog << " -h | --help                                    show this help\n\n";
 
-  // The two operator-facing surfaces: run / worker (one entry each), then the helper
-  // (show-config).  Categories carry them; the full pipeline set is rendered below
-  // under its OWN "Known pipelines" section, not mixed into the Commands list.
+  // The two operator-facing surfaces: run / worker (one entry each), then the helpers
+  // (show-config / show-pipelines).  Categories carry them; the full pipeline set no
+  // longer renders here -- it moved to the `show-pipelines` subcommand, so where the
+  // "Known pipelines" table used to be spelled out there is now a one-line pointer.
   std::vector<std::pair<std::string, std::string>> commandSubs, helperSubs;
   for (const auto& sc : m_entries)
     (sc.category == "helper" ? helperSubs : commandSubs).push_back({sc.name, sc.description});
   renderCategory(os, "Commands (the pipeline is chosen with --pipeline / -p)",
                  commandSubs);
 
-  // The full pipeline set: the entries the --pipeline value may take, one line each
-  // with their blurb (the same blurbs the --pipeline description lists).  Kept as its
-  // own section so the operator sees every pipeline without reading --help first.
-  std::vector<std::pair<std::string, std::string>> pipelineSubs;
-  for (const auto& e : canonicalPipelines())
-    pipelineSubs.push_back({e.name, e.description});
-  renderCategory(os, "Known pipelines (select with --pipeline / -p)", pipelineSubs);
+  // Where the full pipeline table used to be (a "name = blurb" line per pipeline, shared
+  // with the --pipeline help) now sits a pointer instead: `show-pipelines` lists every
+  // pipeline with its explanation, so the whole set is shown ONCE -- there -- rather than
+  // duplicated across this index and every run / worker / vlm --help.  The caption is kept
+  // so the slot reads as a section; show-pipelines also appears below under "Helper
+  // subcommands".
+  os << "Known pipelines: run '" << prog << " show-pipelines' to list and describe the available pipelines.\n\n";
   renderCategory(os, "Helper subcommands", helperSubs);
 
   os << "EXAMPLES:\n";

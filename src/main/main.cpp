@@ -1,11 +1,12 @@
-// ovgenai -- the CLI front-end.  The whole command surface now lives in one
-// place (commands.{hpp,cpp}):  a subcommand table of one entry per
-// OpenVINO.GenAI C++ pipeline (llm / vlm / whisper / asr / tts / omni /
-// embedding / text-embedding / rerank / the image- and video-generation
-// pipelines; the full list is in commands.cpp), plus the `show-config` helper.
-// main just hands argv to that table.  The previous `worker` / `run` entry
-// points are gone, superseded by the per-pipeline subcommands each of which
-// now carries a --worker switch for the long-lived piped-worker form.
+// ovgenai -- the CLI front-end.  The whole command surface lives in one place
+// (commands.{hpp,cpp}): four subcommands -- `run` (run one pipeline one-shot) and
+// `worker` (run one pipeline as the long-lived piped worker), each picking the
+// OpenVINO.GenAI pipeline by a single required --pipeline / -p parameter, plus the
+// `show-config` and `show-pipelines` helpers (the latter is the one place the full
+// table of supported pipelines is now listed; the top-level --help and the run /
+// worker --pipeline help just point there).  The old per-pipeline subcommands
+// (one each for llm / vlm / whisper / ...) and their --worker switch are gone.
+// main just hands argv to that table.
 #include "commands.hpp"
 
 #include <string>

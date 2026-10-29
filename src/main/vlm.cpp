@@ -27,7 +27,7 @@
 // JSON the same robust way, and only feeds the engine strings.
 #include "vlm.hpp"
 
-#include "commands.hpp"               // pipelineListString -- the --pipeline blurb, re-used here
+#include "commands.hpp"               // pipelineParamDesc -- the --pipeline help pointer, re-used here
 #include "config.hpp"                 // ConfigError / preProcess / rephraseBoost / compactJsonOf
 #include "util.hpp"                   // base64_decode
 #include "model_load_config.hpp"      // parseModelLoadConfig + ModelLoadConfig
@@ -918,12 +918,13 @@ po::options_description vlmOptionsDesc() {
   s.add(config::ModelSchedulerConfig::schedulerOptionsDesc());
   s.add(config::ModelRequestConfig::requestOptionsDesc());
   // The new general parameter: the run / worker front-end routes here by it, so the
-  // body's in-body parse (which tolerates --pipeline, then strips it) knows it too --
-  // reuse the shared one-line-per-pipeline enumeration, so the parse and its --help
-  // cannot drift.  Name / description are C-strings (this boost build's easy_init has
-  // only (const char* name, value, const char* description)): the std::string is held
-  // in a named local and bound via .c_str() (boost copies it inside add_option).
-  const std::string pipelineDesc = ovgenai::commands::pipelineListString();
+  // body's in-body parse (which tolerates --pipeline, then strips it) knows it too.
+  // Reuse the shared --pipeline help (now a one-line pointer to `show-pipelines`, not
+  // the full table), so the parse and its --help cannot drift.  Name / description are
+  // C-strings (this boost build's easy_init has only (const char* name, value,
+  // const char* description)): the std::string is held in a named local and bound via
+  // .c_str() (boost copies it inside add_option).
+  const std::string pipelineDesc = ovgenai::commands::pipelineParamDesc();
   s.add_options()
     ("pipeline,p", po::value<std::string>(), pipelineDesc.c_str())
     // The special one-shot direct chat (vlm's own surface).  --input is the 'run'
