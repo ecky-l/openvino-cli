@@ -1,5 +1,7 @@
 // End-to-end smoke test: launches the built `ovgenai` binary as a subprocess and
-// checks the front-end dispatch + the shared load-model args, from outside the
+// checks the new front-end -- the `run` / `worker` subcommands, each picking a
+// pipeline by the required --pipeline/-p (the old per-pipeline subcommands and the
+// --worker flag are gone) plus the shared load-model args, from outside the
 // process (the unit tests in config_test.cpp cover the parser logic directly).
 //
 // OVGENAI_WORKER_BIN is baked in at configure time (see CMakeLists); when it is
@@ -123,34 +125,41 @@ TEST(vcli_worker, configErrorOnBadEnumAndMissingRequired) {
   EXPECT_NE(err.find("model"), std::string::npos);
 }
 
-TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
+TEST(vcli_worker, runAndWorkerSubcommandsResolveAndExitZero) {
   if (!ovgenaiRuns()) GTEST_SKIP() << "ovgenai not runnable here (needs `eval $(./setupenv.sh)`)";
   std::string out, err;
-  // Every pipeline subcommand consumes the identical shared load-model surface
-  // and (this phase) exits 0 after resolving it, having reported the model to
-  // stderr.  --worker must flip the reported mode -- and it is a *bound* bool,
-  // not the notify-defaulted variables_map (which would read a "present" flag
-  // even for an absent one) -- so a one-shot (worker omitted) must NOT report
-  // itself as a worker; assert both directions to catch that pitfall.
-  // --worker present -> the stub reports "worker mode":
+  // The pipeline is now a --pipeline/-p parameter; the FORM (one-shot vs long-lived)
+  // is the subcommand.  So `run`/`worker --pipeline llm` on the shared load-model
+  // surface each exit 0 after resolving it, having reported the model + the mode to
+  // stderr -- and the mode now comes from the subcommand (run -> one-shot, worker ->
+  // worker), so a `worker` invocation must report "worker mode" and a `run` one must
+  // report "one-shot": assert both directions (there is no --worker flag to misbind).
+  // `worker --pipeline llm` -> the stub reports "worker mode":
   EXPECT_EQ(runOvgenai(
-      {"llm", "--worker", "--model", "./tiny-gpt2-ov", "--device", "CPU"},
+      {"worker", "--pipeline", "llm", "--model", "./tiny-gpt2-ov", "--device", "CPU"},
       &out, &err),
        0);
   EXPECT_NE(err.find("worker mode"), std::string::npos);
   EXPECT_NE(err.find("/tiny-gpt2-ov"), std::string::npos);
-  // --worker omitted -> `vlm` is the first pipeline with a REAL body: it loads a
-  // VLMPipeline and generates, so it needs a genuine (random-weight) VLM model --
-  // NOT the LLM tiny-gpt2-ov used for the llm check above -- plus something to
-  // generate, via --input (this runner feeds /dev/null on stdin, which now is
-  // simply not read while --input is present).  A clean run is rc 0, reports
-  // "one-shot", logs the model, and emits a result line; an un-exec'able box /
-  // a missing fixture skips rather than fails.
+  // `run --pipeline llm` (one-shot) -> the same stub reports "one-shot" for the model:
+  EXPECT_EQ(runOvgenai(
+      {"run", "--pipeline", "llm", "--model", "./tiny-gpt2-ov", "--device", "CPU"},
+      &out, &err),
+       0);
+  EXPECT_NE(err.find("one-shot"), std::string::npos);
+  EXPECT_NE(err.find("/tiny-gpt2-ov"), std::string::npos);
+  // The `run --pipeline vlm` one-shot is the first pipeline with a REAL body: it
+  // loads a VLMPipeline and generates, so it needs a genuine (random-weight) VLM
+  // model -- NOT the LLM tiny-gpt2-ov above -- plus a chat to generate.  --input is
+  // the run one-shot's direct surface (this runner feeds /dev/null on stdin, which is
+  // simply not read while --input is present).  A clean run is rc 0, reports "one-shot",
+  // logs the model, and emits a result line; an un-exec'able box / a missing fixture
+  // skips rather than fails.
 #if defined(OVGENAI_VLM_FIXTURE)
   if (::access(OVGENAI_VLM_FIXTURE, F_OK) == 0) {
     std::string vout, verr;
     int rc = runOvgenai(
-        {"vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU",
+        {"run", "--pipeline", "vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU",
          "--input", "{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
          "--max-tokens", "4"},
         &vout, &verr);
@@ -169,21 +178,23 @@ TEST(vcli_worker, pipelineSubcommandsResolveAndWorkerExitsZero) {
 #endif
 }
 
-// --input and --worker are two exclusive input surfaces, so giving both is a
-// usage error the front-end must reject on stderr with exit 1, before any model
-// load -- hence this test needs no VLM fixture, only that the binary execs
-// (the ovgenaiRuns gate, shared with the other vcli_worker tests).  The conflict
-// is detected from the bound --worker bool and the optional --input, so the
-// --input value is irrelevant (any token) and no --model/--device is even
-// required to reach this early return.
-TEST(vcli_worker, inputAndWorkerConflictExitsOne) {
+// --input is now a SPECIAL of the `run` one-shot; the `worker` subcommand offers no
+// --input at all (its stdin IS the line-JSON protocol) -- so the two surfaces that
+// used to be mutually-exclusive flags are now two subcommands, and a stray --input on
+// the worker is an "unknown option", rejected at parse time on stderr with exit 2
+// before any model load -- hence this test needs no VLM fixture, only that the binary
+// execs (the ovgenaiRuns gate, shared with the other vcli_worker tests).  --input is
+// unknown-to-worker regardless of its value, so no --model/--device is reached.
+TEST(vcli_worker, workerRejectsInputExitsTwo) {
   if (!ovgenaiRuns()) GTEST_SKIP() << "ovgenai not runnable here (needs `eval $(./setupenv.sh)`)";
   std::string out, err;
-  int rc = runOvgenai({"vlm", "--input", "{\"messages\":[]}", "--worker"},
+  int rc = runOvgenai({"worker", "--pipeline", "vlm", "--input", "{\"messages\":[]}"},
                       &out, &err);
-  EXPECT_EQ(rc, 1) << "--input and --worker together must exit 1 (stderr):\n" << err;
-  EXPECT_NE(err.find("mutually exclusive"), std::string::npos)
-      << "expected the --input/--worker conflict text on stderr:\n" << err;
+  EXPECT_EQ(rc, 2) << "a stray --input must be an unknown option on the worker (stderr):\n" << err;
+  EXPECT_NE(err.find("unknown option"), std::string::npos)
+      << "expected the unknown-option rejection on stderr:\n" << err;
+  EXPECT_NE(err.find("--input"), std::string::npos)
+      << "the offending --input should be named on stderr:\n" << err;
 }
 
 #else  // OVGENAI_WORKER_BIN not defined at configure time

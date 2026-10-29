@@ -1,7 +1,8 @@
-// End-to-end coverage of the `vlm` image-source surface (req 4). Each test
-// launches the built `ovgenai` binary as a subprocess against the committed
-// tiny-random--qwen3.5-ov fixture and feeds a one-user-message chat whose single
-// part is an image, with the image `url` in every accepted form:
+// End-to-end coverage of the `vlm` pipeline's image-source surface (req 4). Each test
+// launches the built `ovgenai` binary as a subprocess -- now `ovgenai run --pipeline
+// vlm ...` -- against the committed tiny-random--qwen3.5-ov fixture and feeds a
+// one-user-message chat whose single part is an image, with the image `url` in
+// every accepted form:
 //
 //   * "data:<mime>;base64,XXX"  -- the built-in mime-type / base64 form (kept);
 //   * "file://<absolute>"        -- an explicit file:// scheme;
@@ -202,7 +203,7 @@ void runImageVariant(const std::string& uri,
                      const char* what) {
   const std::string in = chatWithImage(uri);
   std::vector<std::string> args =
-      {"vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU"};
+      {"run", "--pipeline", "vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU"};
   if (stdIn.empty()) {
     args.push_back("--input");
     args.push_back(in);
@@ -307,7 +308,7 @@ TEST(vlm_image, missingFileIsRejected) {
   std::string why;
   if (!vlmReady(&why)) { GTEST_SKIP() << why; return; }
   std::vector<std::string> args = {
-      "vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU",
+      "run", "--pipeline", "vlm", "--model", OVGENAI_VLM_FIXTURE, "--device", "CPU",
       "--input", chatWithImage("file:///no/such/img-xyz.png"),
       "--max-tokens", "4"};
   std::string out, err;

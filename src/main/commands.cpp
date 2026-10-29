@@ -1,38 +1,94 @@
-// ovgenai's subcommand front-end -- see commands.hpp for the design (one
-// subcommand per OpenVINO.GenAI C++ pipeline, plus the `show-config` helper).
-// Each subcommand's own `--help` is boost-rendered; the top-level `ovgenai
-// --help` index is hand-laid instead, so a subcommand shows as a bare word --
-// boost would print a one-token option as "--name", which wrongly reads as a
-// flag (see the renderCategory / renderEntry note near the top of this file).
+// ovgenai's subcommand front-end -- the ONE place that owns the command surface.
+// See commands.hpp for the design: three subcommands (run / worker / show-config)
+// instead of a per-pipeline subcommand plus a --worker flag.  The pipeline is now a
+// *general* required parameter, --pipeline/-p, shared by run and worker -- so the
+// same one subcommand drives every OpenVINO.GenAI C++ pipeline (the old per-pipeline
+// subcommands are gone): run picks the one-shot form, worker the long-lived one, and
+// the pipeline name (the --pipeline value) selects which body executes.  `--input`
+// is the special one-shot direct chat of the `run` subcommand; `worker` has no
+// --input (its stdin IS the protocol).
 //
-// This file is the whole command surface. It leans on the existing, untouched
-// config layer (config.hpp's parse helpers + the four config classes' boost
-// sections + JSON), so a subcommand's `--help` and its parser share one
-// options_description and cannot drift -- the same single-source principle
-// config.cpp already applies.
+// Each subcommand's own --help is boost-rendered (the general section -- its own
+// root options, --pipeline / [--input] / --help -- boost draws first, the four
+// named config sections after).  The *top-level* `ovgenai --help` index is
+// hand-laid like it was, but now as  Commands (run / worker) / Known pipelines
+// (the full --pipeline set, the one-line blurbs) / Helper subcommands (show-config).
 #include "commands.hpp"
 
-#include "config.hpp"                // ConfigError / preProcess / rephraseBoost / joinList
-                                    // / kHelp* / showConfigJson / the shared parse helpers
-#include "model_load_config.hpp"     // parseModelLoadConfig + loadOptionsDesc
-#include "model_runtime_config.hpp"  // parseModelRuntimeConfig + runtimeOptionsDesc
-#include "model_scheduler_config.hpp"// parseModelSchedulerConfig + schedulerOptionsDesc
-#include "model_request_config.hpp"  // parseModelRequestConfig + requestOptionsDesc
-#include "vlm.hpp"                    // runVlm -- the first real pipeline body
+#include "config.hpp"                    // ConfigError / preProcess / rephraseBoost / joinList
+                                        // / kHelp* / showConfigJson / the shared parse helpers
+#include "model_load_config.hpp"         // parseModelLoadConfig + loadOptionsDesc
+#include "model_runtime_config.hpp"      // parseModelRuntimeConfig + runtimeOptionsDesc
+#include "model_scheduler_config.hpp"    // parseModelSchedulerConfig + schedulerOptionsDesc
+#include "model_request_config.hpp"      // parseModelRequestConfig + requestOptionsDesc
+#include "vlm.hpp"                        // runVlm -- the first (and, for now, only) real body
 
-#include "ovgenai_config.h"          // OVGENAI_VERSION
+#include "ovgenai_config.h"              // OVGENAI_VERSION
 
 #include <algorithm>
 #include <cstdio>
+#include <functional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
-#include <boost/program_options.hpp>   // the `po` alias is provided by config.hpp
+#include <boost/program_options.hpp>    // the `po` alias is provided by config.hpp
 
 namespace ovgenai {
 namespace commands {
-namespace {
+
+// --- The canonical pipeline set: the single source of truth every surface reads --
+//   * the --pipeline / -p help (pipelineListString) -- a one-line-per-pipeline list;
+//   * `pipelineNames` (a stable snapshot the tests assert);
+//   * the SubcommandTable's top-level "Known pipelines" index;
+//   * the run/worker router (a body is bound to each name in the constructor).
+// Both are non-anonymous (declared in commands.hpp) so vlm.cpp reuses
+// pipelineListString for its own in-body --pipeline flag, keeping the body's parse
+// consistent with the help.  Entry order is the display order.
+const std::vector<PipelineSpec>& canonicalPipelines() {
+  static const std::vector<PipelineSpec> p = {
+      {"llm",            "LLMPipeline: causal text generation (text in -> text out)"},
+      {"vlm",            "VLMPipeline: vision-language model (images + text in -> text out)"},
+      {"whisper",        "WhisperPipeline: speech recognition (audio in -> transcribed text out)"},
+      {"asr",            "ASRPipeline: automatic speech recognition (audio in -> text out)"},
+      {"tts",            "Text2SpeechPipeline: text-to-speech (text in -> audio out)"},
+      {"omni",           "OmniPipeline: audio-visual multi-modal model (audio + text)"},
+      {"embedding",      "EmbeddingPipeline: inputs -> dense embedding vectors"},
+      {"text-embedding", "TextEmbeddingPipeline: text -> embedding vectors"},
+      {"rerank",         "TextRerankPipeline: rerank candidate texts against a query"},
+      {"text2image",     "Text2ImagePipeline: text -> image generation (diffusion)"},
+      {"image2image",    "Image2ImagePipeline: image + text -> image (img2img, diffusion)"},
+      {"inpainting",     "InpaintingPipeline: image + mask + text -> edited image (diffusion)"},
+      {"text2video",     "Text2VideoPipeline: text -> video generation (diffusion)"},
+      {"image2video",    "Image2VideoPipeline: image + optional text -> video (diffusion)"},
+  };
+  return p;
+}
+
+const std::vector<std::string>& pipelineNames() {
+  static const std::vector<std::string> n = [] {
+    std::vector<std::string> out;
+    for (const auto& e : canonicalPipelines()) out.push_back(e.name);
+    return out;
+  }();
+  return n;
+}
+
+// The --pipeline description: an intro line, then one line per pipeline ("name = blurb").
+// Each line is a separate boost description line, so boost re-indents the long
+// wrapped ones under the flags column -- a scannable list, not a wall of text.
+std::string pipelineListString() {
+  // A lead-in line, then one "name = blurb" line per pipeline (a "\n" before each --
+  // no trailing one, so boost re-indents every entry to the flags column yet emits no
+  // blank line after the last).
+  std::string s = "The OpenVINO.GenAI pipeline to run (required, no default). Choose one of:";
+  for (const auto& e : canonicalPipelines())
+    s += "\n" + e.name + " = " + e.description;
+  return s;
+}
+
+namespace {  // file-local front-end helpers
 
 // True iff the subcommand's own args ask for help before we touch a value.
 bool anyHelp(const std::vector<std::string>& a) {
@@ -41,59 +97,11 @@ bool anyHelp(const std::vector<std::string>& a) {
   return false;
 }
 
-// The combined boost section set shared by every subcommand -- the load, then
-// runtime, then scheduler, then request sections (each exactly as its owning
-// class renders it) -- plus a valueless --worker switch when the subcommand
-// offers the long-lived worker form (the pipelines do; `show-config`, a helper,
-// does not), plus the --help switch.  Returning the description (not a string)
-// lets a subcommand use the SAME object both to render its own --help and to
-// parse, so the two can never disagree.  `buildOptionsDesc(false, _)` matches
-// config.cpp's combinedConfigUsage() exactly (untitled root + the four sections
-// + --help), which is why `show-config`'s output is byte-identical to before.
-//
-// The `--worker` switch is *bound* to a real bool the caller passes in (hence the
-// 2nd parameter) instead of being read back out of the variables_map: `notify()`
-// materialises a valueless bool_switch's default (false) into the map even for an
-// *absent* option, so `vm.count("worker")` reports the flag as set when it was
-// never passed -- a one-shot would then report that it was a worker (the classic
-// pitfall).  Binding flips it true only when the flag is actually on the line,
-// and `notify()` leaves a bound switch at that value, so the caller reading back
-// the bound bool gets the reliable one-shot/worker distinction.
-po::options_description buildOptionsDesc(bool withWorker, bool& worker) {
-  po::options_description s("", config::kHelpLineLength, config::kHelpMinDescriptionLength);
-  s.add(config::ModelLoadConfig::loadOptionsDesc());
-  s.add(config::ModelRuntimeConfig::runtimeOptionsDesc());
-  s.add(config::ModelSchedulerConfig::schedulerOptionsDesc());
-  s.add(config::ModelRequestConfig::requestOptionsDesc());
-  if (withWorker)
-    s.add_options()("worker", po::bool_switch(&worker),
-                     "Run as a long-lived worker subprocess (omit for a one-shot "
-                     "run): stay up and read/write a line-JSON protocol on "
-                     "stdin/stdout, one JSON object per line. [Not yet implemented "
-                     "in this build -- the subcommand body is infrastructure only.]");
-  else
-    worker = false;
-  s.add_options()("help", po::bool_switch(), "Show this help message");
-  return s;
-}
-
-// --- The top-level `ovgenai --help` index (hand-rendered, not boost) ---------
-// We deliberately do NOT render this index with a boost options_description:
-// given a one-token entry, boost always prints it as "--llm" (it prepends "--"
-// to a long option and exposes no switch to suppress that), which reads as a
-// flag, not a subcommand.  boost still renders each subcommand's *own* --help
-// (via subcommandHelp below, where the "--"-prefixed flags ARE correct); we just
-// lay the *list of subcommands* out by hand as a two-column table -- the same
-// column geometry boost uses (the kHelp* constants), but with the names bare.
-
-// Word-wrap `desc` into lines no wider than `lineLen - colStart`, then emit it:
-// the first wrapped line rides the same physical line as the already-written
-// (padded) name; the remaining lines are indented to `colStart`.  Precomputing
-// into a list of fully-constructed lines first keeps the trailing newlines
-// trivial -- exactly one "\n" per blurb line, no special-casing of a (possibly
-// empty) first line, so a blurb-less entry still prints its name + "\n".  A
-// token longer than the column is left intact rather than split (these are
-// short subcommand blurbs, not prose).
+// Word-wrap `desc` into lines no wider than `lineLen - colStart`, then emit: the
+// first wrapped line rides the same physical line as the already-written (padded)
+// name; the rest are indented to `colStart`.  Used only by the top-level index (a
+// subcommand is a bare word, not flag); boost still renders each subcommand's own
+// --help.  The token longer than the column is left intact rather than split.
 void renderEntry(std::ostream& os, const std::string& name, const std::string& desc,
                  size_t colStart, size_t lineLen) {
   const size_t blurbWidth = (lineLen > colStart) ? lineLen - colStart : 0;
@@ -122,53 +130,123 @@ void renderEntry(std::ostream& os, const std::string& name, const std::string& d
   if (lines.empty()) os << paddedName << "\n";  // a blurb-less entry is still one line
 }
 
-// One capioned category: the caption line, a run of entries, then a trailing
-// blank line that separates it from whatever follows.  The 1st column is the
-// category's longest name plus a 2-space gap; the blurb then wraps to the shared
-// help line width, so an index line visually lines up with the boost-rendered
-// sections the same subcommand later shows in its own --help.
+// One capioned category of the top-level index: a (name | description) pair list,
+// rendered with boost's column geometry (the shared kHelp* constants) so an index
+// line visually lines up with the boost-rendered section the same subcommand later
+// shows in its own --help.  One capter works for {name, description} pairs, which
+// is both a subcommand entry (name + blurb) and a pipeline spec (name + blurb).
 void renderCategory(std::ostream& os, const std::string& caption,
-                    const std::vector<Subcommand>& subs) {
-  if (subs.empty()) return;                       // an empty category draws nothing
+                    const std::vector<std::pair<std::string, std::string>>& kv) {
+  if (kv.empty()) return;                        // an empty category draws nothing
   os << caption << ":\n";
   size_t nameCol = 0;
-  for (const auto& sc : subs)
-    nameCol = std::max(nameCol, sc.name.size());
-  const size_t colStart = 2 + nameCol + 2;        // 2-space indent, then the name column + a gap
-  for (const auto& sc : subs)
-    renderEntry(os, sc.name, sc.description, colStart, config::kHelpLineLength);
+  for (const auto& kv2 : kv)
+    nameCol = std::max(nameCol, kv2.first.size());
+  const size_t colStart = 2 + nameCol + 2;       // 2-space indent, then the name column + a gap
+  for (const auto& kv2 : kv)
+    renderEntry(os, kv2.first, kv2.second, colStart, config::kHelpLineLength);
   os << "\n";
 }
 
-// `<prog> <sub> --help`: a Usage line + the subcommand's blurb, a short note,
-// then the shared options rendered by boost (one source == the parser's desc).
-std::string subcommandHelp(const std::string& prog, const std::string& sub,
-                           const std::string& desc, bool withWorker) {
+// The combined option set a `run` / `worker` parse (and, via subcommandHelp, its
+// --help) shares: the four named config sections the class that owns them render,
+// plus the GENERAL (untitled-root) section boost draws *first* -- the new
+// `--pipeline`/`-p` (always; required) and, for the one-shot `run` form only,
+// `--input`/`-i`.  A `worker` form passes isRunForm=false so its --help offers no
+// --input (a worker's stdin IS its protocol) -- which is exactly why --input is a
+// `run`-only special and a `worker --input ...` is rejected as "unknown option".
+//
+// The description is returned (not a string) so the SAME object renders the
+// --help and parses, which cannot disagree; it is built identically to
+// config.cpp's combinedConfigUsage() (untitled root + the four sections + --help)
+// plus the general parameters, so a no-pipeline request still parses clean.
+po::options_description generalOptionsDesc(bool isRunForm) {
+  po::options_description s("", config::kHelpLineLength, config::kHelpMinDescriptionLength);
+  s.add(config::ModelLoadConfig::loadOptionsDesc());
+  s.add(config::ModelRuntimeConfig::runtimeOptionsDesc());
+  s.add(config::ModelSchedulerConfig::schedulerOptionsDesc());
+  s.add(config::ModelRequestConfig::requestOptionsDesc());
+  // The new general parameter: which pipeline this run / worker drives.  Required
+  // (no default -- validated by the front-end, which owns the "missing --pipeline"
+  // error), value taken by -p; the help lists every pipeline as one line each
+  // (`pipelineListString`), so the full set is visible right here.  Name / description
+  // are C-strings: this boost build's easy_init only overloads operator() for
+  // (const char* name, value, const char* description) (no std::string variant), so the
+  // std::string from pipelineListString is held in a named local and passed by .c_str()
+  // -- boost copies it inside add_option, so the pointer never dangles.
+  const std::string pipelineDesc = pipelineListString();
+  s.add_options()
+    ("pipeline,p", po::value<std::string>(), pipelineDesc.c_str());
+  if (isRunForm)
+    s.add_options()
+    // The special one-shot surface: only `run` offers it (a worker reads its
+    // protocol from stdin).  When given it is used verbatim (no stdin read); when
+    // omitted the chat is read from stdin (a pipe => one line; a terminal => a
+    // lone '.').  Meaningful for chat-shaped pipelines (e.g. vlm); others ignore it.
+    ("input,i", po::value<std::string>(),
+        "The 'run' one-shot's direct input: the chat to run, as a gen_config JSON object "
+        "({\"messages\":[...], optionally \"tools\" / \"chat_template_kwargs\"}). When given, "
+        "no stdin is read. When omitted, the chat is read from stdin: a pipe yields one "
+        "(possibly large) line, an interactive terminal is read a line at a time until a "
+        "lone '.' (the mail command's way). Meaningful for pipelines that take a direct chat "
+        "(e.g. vlm); a worker has no --input -- it reads its line-JSON protocol from stdin instead.");
+  s.add_options()("help", po::bool_switch(), "Show this help message");
+  return s;
+}
+
+// `<prog> <run|worker> --help`: a Usage line + a note, then the shared options
+// (the general section + the four config sections) rendered by boost -- one source
+// for both the print and the parse.  isRunForm gives `run` (offers --input); the
+// worker's prose explains why it has none.
+std::string subcommandHelp(const std::string& prog, const std::string& modeName,
+                           bool isRunForm) {
   std::ostringstream os;
-  os << "Usage: " << prog << " " << sub << " [model-dir] <options>\n";
-  os << "  " << desc << "\n\n";
-  os << "A positional <model-dir> is a friend for --model when it is the only\n";
-  os << "model. --context-window / --worker-max-respawns / --worker-line-limit are not\n";
-  os << "available here. The model is loaded from these shared options:\n\n";
-  bool worker = false;  // the --worker entry is pure presentation here (the
-                        // caller only renders this help, never parses it)
-  os << buildOptionsDesc(withWorker, worker);
+  if (isRunForm) {
+    os << "Usage: " << prog << " run --pipeline <p> [model-dir] <options>\n";
+    os << "  Choose the pipeline with --pipeline / -p (required); then run it ONCE: the chat\n";
+    os << "  comes from --input when given, otherwise from stdin (a pipe -> one (possibly large)\n";
+    os << "  line; a terminal -> line-by-line, a lone '.' ending it, as in mail).  The result is\n";
+    os << "  one JSON object on stdout.\n\n";
+  } else {
+    os << "Usage: " << prog << " worker --pipeline <p> [model-dir] <options>\n";
+    os << "  Choose the pipeline with --pipeline / -p (required); then, instead of one-shot, STAY\n";
+    os << "  UP and read/write the line-JSON protocol on stdin/stdout (GENERATE / PING / CANCEL /\n";
+    os << "  UNLOAD -> READY / RESULT / PONG / CANCEL / DONE / ERROR -- one JSON object per line).\n";
+    os << "  A worker has NO --input: its stdin IS that protocol (a direct --input is the\n";
+    os << "  'run' one-shot's surface, which is why the two are now two subcommands).\n\n";
+  }
+  os << generalOptionsDesc(isRunForm);          // boost renders the section
   return os.str();
 }
 
-// The `show-config` helper, kept verbatim from the pre-redesign 3-entry front-end
-// (its resolve-and-print behaviour): parse the (unchanged, all-boost) four
-// configs and print their JSON, loading nothing. Only the per-subcommand --help
-// renderer changed (subHelp -> subcommandHelp), so its stdout is byte-identical.
-int runShowConfig(const std::string& prog, const std::vector<std::string>& args) {
+// `show-config`'s --help: the four shared config sections + --help, and NOTHING else
+// -- it prints the resolved config and loads no model, so it neither picks a pipeline
+// (--pipeline) nor takes a one-shot chat (--input) nor is a worker.
+std::string showConfigHelp(const std::string& prog) {
+  std::ostringstream os;
+  os << "Usage: " << prog << " show-config <options>\n";
+  os << "  Parse the (unchanged) load config from the command line and print it as JSON, then\n";
+  os << "  exit -- no model is loaded, so no --model / --device is required just to see what\n";
+  os << "  would resolve.  A helper: it neither selects a pipeline (--pipeline) nor takes the\n";
+  os << "  'run' one-shot input (--input), and is not a (--worker) worker.\n\n";
+  po::options_description s("", config::kHelpLineLength, config::kHelpMinDescriptionLength);
+  s.add(config::ModelLoadConfig::loadOptionsDesc());
+  s.add(config::ModelRuntimeConfig::runtimeOptionsDesc());
+  s.add(config::ModelSchedulerConfig::schedulerOptionsDesc());
+  s.add(config::ModelRequestConfig::requestOptionsDesc());
+  s.add_options()("help", po::bool_switch(), "Show this help message");
+  os << s;
+  return os.str();
+}
+
+// The `show-config` helper, kept from the pre-redesign front-end (its
+// resolve-and-print behaviour): parse the (unchanged, all-boost) four configs and
+// print their JSON, loading nothing.  Only its --help renderer changed (now
+// showConfigHelp -- no --pipeline / --input / --worker, since it is a helper).
+int runShowConfig(const std::string& prog, const std::vector<std::string> args) {
   const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the token
   if (anyHelp(sa)) {
-    std::printf("%s",
-                subcommandHelp(prog, "show-config",
-                               "Print the resolved load config as JSON and exit "
-                               "(no model is loaded)",
-                               /*withWorker=*/false)
-                    .c_str());
+    std::printf("%s", showConfigHelp(prog).c_str());
     return 0;
   }
   try {
@@ -185,23 +263,28 @@ int runShowConfig(const std::string& prog, const std::vector<std::string>& args)
   }
 }
 
-// Every pipeline subcommand shares this stub: parse the combined sections plus
-// --worker (so a worker invocation is "known", not an "unknown option"), confirm
-// the load model is specified (the one contract a worker must keep before going
-// up), report -- to stderr, like the old worker/run -- the model a supervisor
-// would log (stdout is reserved for the future result / protocol channel), and
-// exit 0.  The real <Pipeline> body (load + the one-shot / worker loop) lands in
-// a later phase; nothing here touches OpenVINO.
-int runPipelineStub(const std::string& name, const std::string& desc,
-                    const std::string& prog, const std::vector<std::string>& args) {
-  const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the subcommand token
-  if (anyHelp(sa)) {
-    std::printf("%s", subcommandHelp(prog, name, desc, /*withWorker=*/true).c_str());
+// The infrastructure-only body shared by every pipeline that has not yet grown a
+// real one: it is reached (for both `run` and `worker`) with the routed call whose
+// argv[0] is the `run`/`worker` token and whose remaining tokens still carry the
+// general --pipeline it was routed by -- so it drops token 0 and parses the general
+// section + the four named sections with boost (tolerating both --pipeline and
+// --input via generalOptionsDesc, the way the old stub tolerated --worker) and then
+// confirms the load model is specified (the one contract a worker must keep before
+// going up), mirrors it to stderr, like a supervisor would log it (stdout is
+// reserved for the future result / protocol channel), and exits 0.  The real
+// <Pipeline> body (load + one-shot / worker loop) lands per pipeline later; nothing
+// here touches OpenVINO.
+int runPipelineStub(const std::string& name, const std::string& /*desc*/,
+                    const std::string& /*prog*/, const std::vector<std::string>& args,
+                    bool worker) {
+  const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the run/worker token
+  if (anyHelp(sa)) {  // the front-end intercepts --help before delegating, so this is
+    // only a defensive fallback if a body were ever driven straight; keep it coherent
+    // (the general section + four sections) rather than the deleted --worker switch.
+    bool unused = false; (void) unused;
+    std::printf("%s", subcommandHelp("", name, /*isRunForm=*/!worker).c_str());
     return 0;
   }
-  // Bound to the --worker entry: true iff the worker form was actually requested
-  // (see buildOptionsDesc -- a plain vm.count() is unreliable here).
-  bool worker = false;
   try {
     const config::PreProcessed pp = config::preProcess(sa);
     if (pp.positionalCount > 1) {
@@ -214,7 +297,11 @@ int runPipelineStub(const std::string& name, const std::string& desc,
     cleanArgs.erase(std::remove(cleanArgs.begin(), cleanArgs.end(), std::string("-")),
                     cleanArgs.end());
 
-    po::options_description desc = buildOptionsDesc(true, worker);
+    // The general section (untitled root: --pipeline + the run form's --input) plus
+    // the four named sections.  The stub reads only model / device from the map;
+    // generalOptionsDesc(true) keeps --input "known" so a routed run that also passed
+    // --input is not rejected (a worker route never carries --input anyway).
+    po::options_description desc = generalOptionsDesc(/*isRunForm=*/true);
     po::positional_options_description posDesc;
     posDesc.add("model", 1);  // a lone positional binds to --model
 
@@ -231,26 +318,28 @@ int runPipelineStub(const std::string& name, const std::string& desc,
       throw config::rephraseBoost(e);
     }
 
-    // Mirror the load config's required set (model / device):
-    // a worker or one-shot should not even go up without them.
+    // Mirror the load config's required set (model / device): a run must not even
+    // go up without them.  (--pipeline is required too, but that is enforced by the
+    // run / worker front-end that routed here, so a body is never reached without it.)
     std::vector<std::string> missing;
-    if (!vm.count("model"))       missing.push_back("--model");
-    if (!vm.count("device"))      missing.push_back("--device");
+    if (!vm.count("model")) missing.push_back("--model");
+    if (!vm.count("device")) missing.push_back("--device");
     if (!missing.empty())
       throw config::ConfigError("missing required load option(s): "
                                 + config::joinList(missing, ", "));
 
-    // A no-default value option gets no phantom entry from notify(), so a
-    // not-passed flag reads back as vm.count()==0 -- safe to count directly.
-    const std::string model =
-        vm.count("model") ? vm["model"].as<std::string>() : std::string();
+    // The model a supervisor would log (stdout is reserved for the future result /
+    // protocol channel); the (worker mode) / (one-shot) label names the form so a
+    // run is provably *not* reported as the other.
+    const std::string model   = vm["model"].as<std::string>();
+    const std::string device  = vm.count("device") ? vm["device"].as<std::string>() : std::string();
     std::fprintf(stderr,
                  "ovgenai: %s%s: not yet implemented (this build is "
-                 "infrastructure only); would %s model '%s'\n",
+                 "infrastructure only); would %s model '%s' on '%s'\n",
                  name.c_str(),
-                 worker ? " --worker (worker mode)" : " (one-shot)",
-                 worker ? "run as a worker for" : "run one-shot for",
-                 model.c_str());
+                 worker ? " (worker mode)" : " (one-shot)",
+                 worker ? "run it as a worker for" : "run a one-shot for",
+                 model.c_str(), device.c_str());
     return 0;
   } catch (const config::ConfigError& e) {
     std::fprintf(stderr, "ovgenai: %s: %s\n", name.c_str(), e.what());
@@ -258,47 +347,112 @@ int runPipelineStub(const std::string& name, const std::string& desc,
   }
 }
 
-}  // close the anonymous namespace of this file's front-end helpers
+// --- Pipeline routing: a name -> the body that runs it -------------------------
+struct PipelineBinding {
+  std::string name;
+  std::string desc;
+  std::function<int(const std::string& /*prog*/, const std::vector<std::string>& /*args*/,
+                    bool /*worker*/)> run;
+};
 
-// Build the table: every OpenVINO.GenAI C++ pipeline (taken from the public
-// .GenAI headers under openvino.genai/src/cpp/include/openvino/genai), one
-// entry each, then the `show-config` helper.  A pipeline entry's run is a lambda
-// that forwards to the shared stub carrying that pipeline's name + blurb.
-SubcommandTable::SubcommandTable() {
-  struct PL {
-    const char* name;  // the token the operator types
-    const char* desc;  // the blurb (ovgenai --help index + a subcommand's --help)
-  };
-  const PL kPipelines[] = {
-      {"llm",            "LLMPipeline: causal text generation (text in -> text out)"},
-      {"vlm",            "VLMPipeline: vision-language model (images + text in -> text out)"},
-      {"whisper",        "WhisperPipeline: speech recognition (audio in -> transcribed text out)"},
-      {"asr",            "ASRPipeline: automatic speech recognition (audio in -> text out)"},
-      {"tts",            "Text2SpeechPipeline: text-to-speech (text in -> audio out)"},
-      {"omni",           "OmniPipeline: audio-visual multi-modal model (audio + text)"},
-      {"embedding",      "EmbeddingPipeline: inputs -> dense embedding vectors"},
-      {"text-embedding", "TextEmbeddingPipeline: text -> embedding vectors"},
-      {"rerank",         "TextRerankPipeline: rerank candidate texts against a query"},
-      {"text2image",     "Text2ImagePipeline: text -> image generation (diffusion)"},
-      {"image2image",    "Image2ImagePipeline: image + text -> image (img2img, diffusion)"},
-      {"inpainting",     "InpaintingPipeline: image + mask + text -> edited image (diffusion)"},
-      {"text2video",     "Text2VideoPipeline: text -> video generation (diffusion)"},
-      {"image2video",    "Image2VideoPipeline: image + optional text -> video (diffusion)"},
-  };
-  for (const auto& p : kPipelines) {
-    const std::string name = p.name;
-    const std::string desc = p.desc;
-    m_entries.push_back(Subcommand{
-        name, "pipeline", desc,
-        [name, desc](const std::string& prog, const std::vector<std::string>& a) -> int {
-          if (name == "vlm")
-            return ovgenai::runVlm(prog, a);   // vlm is the first real body
-          return runPipelineStub(name, desc, prog, a);
+// Build the router from the canonical set, binding each name to its body: `vlm` is
+// the first pipeline with a real body (loads a VLMPipeline and generates), the rest
+// share the infrastructure-only stub (the per-pipeline lambda the old front-end used,
+// now keyed off the --pipeline value instead of a subcommand name).
+const std::vector<PipelineBinding>& pipelineBindings() {
+  static const std::vector<PipelineBinding> b = [] {
+    std::vector<PipelineBinding> v;
+    for (const auto& p : canonicalPipelines()) {
+      const std::string nm = p.name;
+      const std::string d  = p.description;
+      v.push_back(PipelineBinding{nm, d,
+        [nm, d](const std::string& prog, const std::vector<std::string>& a, bool worker) {
+          if (nm == "vlm")
+            return ovgenai::runVlm(prog, a, worker);   // vlm is the first real body
+          return runPipelineStub(nm, d, prog, a, worker);
         }});
+    }
+    return v;
+  }();
+  return b;
+}
+
+int runModeEntry(const std::string& prog, const std::vector<std::string>& args, bool worker) {
+  const std::string modeName = worker ? "worker" : "run";
+  const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the run/worker token
+  if (anyHelp(sa)) {
+    std::printf("%s", subcommandHelp(prog, modeName, /*isRunForm=*/!worker).c_str());
+    return 0;
   }
 
-  // The one operational helper today: `show-config` (kept from the pre-redesign
-  // front-end; no --worker, since it loads nothing).
+  // One full combined parse over the (untitled) general section + the four named
+  // sections: it rejects an unknown/missing-value option here (so a bad flag never
+  // reaches a body) and yields the single general parameter --pipeline, REQUIRED,
+  // which selects the body (it has no default -- boost has no clean "required"
+  // option, so the front-end enforces it the way the model's required set is done).
+  po::options_description desc = generalOptionsDesc(/*isRunForm=*/!worker);
+  po::variables_map vm;
+  try {
+    po::store(po::command_line_parser(sa)
+                  .options(desc)
+                  .style(po::command_line_style::unix_style)
+                  .run(),
+              vm);
+    po::notify(vm);
+  } catch (const po::error& e) {
+    std::fprintf(stderr, "ovgenai: %s: %s\n", modeName.c_str(), config::rephraseBoost(e).what());
+    return 2;
+  }
+  if (!vm.count("pipeline")) {
+    std::fprintf(stderr, "ovgenai: %s: missing required option: --pipeline (or -p)\n",
+                 modeName.c_str());
+    return 2;
+  }
+
+  // Route: the --pipeline value picks the body; the body re-parses the (unchanged)
+  // argv, so the bodies themselves are untouched -- only the token that *selected*
+  // them changed (a --pipeline value, not a subcommand name) and the mode now comes
+  // from WHICH subcommand dispatched (run -> one-shot, worker -> long-lived) instead
+  // of a --worker flag.  The full args (their run/worker token at index 0) are
+  // forwarded verbatim: the body drops index 0 for its own options.
+  const std::string pipeline = vm["pipeline"].as<std::string>();
+  for (const auto& bind : pipelineBindings())
+    if (bind.name == pipeline)
+      return bind.run(prog, args, worker);
+  std::fprintf(stderr, "ovgenai: %s: unknown pipeline '%s'; choose one of: %s\n",
+               modeName.c_str(), pipeline.c_str(),
+               config::joinList(pipelineNames(), ", ").c_str());
+  return 2;
+}
+
+}  // close the anonymous namespace of this file's front-end helpers
+
+// Build the table: the three real subcommands -- run (one-shot) and worker
+// (long-lived), each routing by the --pipeline value to an unchanged pipeline body,
+// then the show-config helper.  A body is bound to a pipeline name in the per-entry
+// lambda, as the old per-pipeline entries did -- that is the move from "one
+// subcommand per pipeline + a --worker flag" to "run / worker subcommand + a
+// --pipeline parameter".
+SubcommandTable::SubcommandTable() {
+  m_entries.push_back(Subcommand{
+      "run", "command",
+      "Run one OpenVINO.GenAI pipeline one-shot; the pipeline is selected by the "
+      "required --pipeline / -p (a lone <model-dir> stands in for --model).",
+      [](const std::string& prog, const std::vector<std::string>& a) {
+        return runModeEntry(prog, a, /*worker=*/false);
+      }});
+
+  m_entries.push_back(Subcommand{
+      "worker", "command",
+      "Run one OpenVINO.GenAI pipeline as a long-lived worker (the form the old --worker "
+      "flag selected); the pipeline is chosen by the required --pipeline / -p, and it reads "
+      "its line-JSON protocol from stdin (so it has no --input).",
+      [](const std::string& prog, const std::vector<std::string>& a) {
+        return runModeEntry(prog, a, /*worker=*/true);
+      }});
+
+  // The one operational helper today: `show-config` (no --pipeline / --input /
+  // --worker -- it prints the resolved config and loads nothing).
   m_entries.push_back(Subcommand{"show-config", "helper",
       "Print the resolved load config as JSON and exit (no model is loaded)",
       &runShowConfig});
@@ -335,26 +489,35 @@ std::string SubcommandTable::usage(const std::string& prog) const {
   os << prog << "  -- OpenVINO/GenAI inference CLI\n\n";
   os << "USAGE:\n";
   os << "  " << prog << " <subcommand> [model-dir] <options>\n";
-  os << "  " << prog << " version | --version        print the version and exit\n";
-  os << "  " << prog << " -h | --help                show this help\n\n";
-  os << "Each <subcommand> loads its model from the SAME shared flags; run\n";
-  os << prog << " <subcommand> --help for a subcommand's full flag list, and add --worker\n";
-  os << "for the long-lived piped worker form (omit it for a one-shot run).\n\n";
+  os << "  " << prog << " run      --pipeline <p> [model-dir] <options>   run one pipeline one-shot\n";
+  os << "  " << prog << " worker   --pipeline <p> [model-dir] <options>   run one pipeline as a long-lived worker\n";
+  os << "  " << prog << " version | --version                            print the version and exit\n";
+  os << "  " << prog << " -h | --help                                    show this help\n\n";
 
-  // The two categories: boost owns each subcommand's own `--help` (above), but
-  // would print a one-token subcommand as "--llm" here, which wrongly reads as a
-  // flag -- so the index is hand-laid instead (see renderCategory).  boost is
-  // simply not used for this listing.
-  std::vector<Subcommand> pipelineSubs;
-  std::vector<Subcommand> helperSubs;
+  // The two operator-facing surfaces: run / worker (one entry each), then the helper
+  // (show-config).  Categories carry them; the full pipeline set is rendered below
+  // under its OWN "Known pipelines" section, not mixed into the Commands list.
+  std::vector<std::pair<std::string, std::string>> commandSubs, helperSubs;
   for (const auto& sc : m_entries)
-    (sc.category == "pipeline" ? pipelineSubs : helperSubs).push_back(sc);
-  renderCategory(os, "Pipeline subcommands (one per OpenVINO.GenAI C++ pipeline)", pipelineSubs);
+    (sc.category == "helper" ? helperSubs : commandSubs).push_back({sc.name, sc.description});
+  renderCategory(os, "Commands (the pipeline is chosen with --pipeline / -p)",
+                 commandSubs);
+
+  // The full pipeline set: the entries the --pipeline value may take, one line each
+  // with their blurb (the same blurbs the --pipeline description lists).  Kept as its
+  // own section so the operator sees every pipeline without reading --help first.
+  std::vector<std::pair<std::string, std::string>> pipelineSubs;
+  for (const auto& e : canonicalPipelines())
+    pipelineSubs.push_back({e.name, e.description});
+  renderCategory(os, "Known pipelines (select with --pipeline / -p)", pipelineSubs);
   renderCategory(os, "Helper subcommands", helperSubs);
 
   os << "EXAMPLES:\n";
-  os << "  " << prog << " llm --model ./model --device CPU\n";
-  os << "  echo 'hi' | " << prog << " llm --worker --model ./model --device CPU\n";
+  os << "  " << prog << " run --pipeline llm --model ./model --device CPU\n";
+  os << "  echo '{\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}' | " << prog
+       << " run --pipeline vlm --model ./model --device CPU\n";
+  os << "  echo '{\"op\":\"GENERATE\"}' | " << prog
+       << " worker --pipeline llm --model ./model --device CPU\n";
   return os.str();
 }
 

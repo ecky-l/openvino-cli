@@ -169,52 +169,71 @@ po::options_description ModelRequestConfig::requestOptionsDesc() {
   po::options_description s(
       "Model request parameters (per-request generation defaults; nullopt falls back to the model-load, then the engine default)",
       kHelpLineLength, kHelpMinDescriptionLength);
-  s.add_options()
-    ("assistant-confidence-threshold,a", po::value<std::string>(),
-        "Confidence threshold for accepting a speculative (assistant/draft) token: "
-        "a draft is accepted only when the main model's probability for it is at least this. "
-        "Lower = accept more drafts (faster, riskier), higher = more conservative. "
-        "Per-request default (the worker protocol may override per request).")
-    ("chat-template-kwargs", po::value<std::string>(),
-        "Chat-template kwargs as a JSON object passed to the tokenizer's apply_chat_template, "
-        "e.g. {\"add_generation_prompt\": true}.")
-    ("enable-thinking", po::value<std::string>(),
-        "The vlm reasoning (thinking) switch: takes true or false (omit for the model's own default). "
-        "true enables the reasoner and sets enable_thinking=true in the applied chat template; false "
-        "disables the reasoner.  A per-request chat_template_kwargs enable_thinking (e.g. over the "
-        "worker stdin) OVERRIDES this flag for that request.  Only meaningful for vlm.")
-    ("frequency-penalty", po::value<std::string>(),
-        "Penalty proportional to how often a token has already appeared in the output; "
-        "0 = no penalty, higher = penalise frequently-repeated tokens by their frequency.")
-    ("max-tokens", po::value<std::string>(),
-        "Maximum number of new tokens to generate before stopping (default 16384).")
-    ("num-assistant-tokens,n", po::value<std::string>(),
-        "Number of draft ('assistant') tokens produced per speculative-decoding step "
-        "before they are verified against the main model (used with "
-        "--assistant-confidence-threshold). Per-request default (the worker protocol may override).")
-    ("presence-penalty", po::value<std::string>(),
-        "Penalty added to the logit of any token that has already appeared in the output, "
-        "regardless of how often; 0 = no penalty, higher = penalise reappearing tokens (encourages variety).")
-    ("repetition-penalty", po::value<std::string>(),
-        "A logit multiplier for already-generated tokens; 1.0 = no penalty (the default), "
-        ">1.0 penalises repeated tokens, <1.0 favours them.")
-    ("seed", po::value<std::string>(),
-        "A random seed for reproducible sampling (the same model / flags / seed reproduces the same token sequence).")
-    ("stream", po::value<std::string>(),
-        "Token aggregation for the vlm streaming output: how many tokens to fold into ONE emitted "
-        "JSON line (default 1 = one line per token, as today).  N>1 aggregates N tokens per line; "
-        "N<=0 emits NO mid-stream output and instead writes a single total line (all of content / "
-        "reasoning_content / tool_calls that the turn produced) at the end of the stream.  Long-only: "
-        "its leading 's' conflicts with --seed, so it takes no short form (like --model-family vs "
-        "--max-tokens).  Only meaningful for vlm; the worker may also set it per request via gen_config.")
-    ("temperature", po::value<std::string>(),
-        "Sampling temperature as a float > 0 -- higher = more random/uniform, lower = more "
-        "deterministic; 0 or negative = greedy (deterministic) decoding. Default 1.0.")
-    // Help mirrors the registry (advertisedModelFamilies()); boost's desc arg is a const
-    // char*, so the *validated* set comes from the registry and this is a literal kept in sync.
-    ("model-family", po::value<std::string>(),
-        "Model family (the reasoning / tool-call output format this model declares): "
-        "qwen35 / hermes / gemma4 / museglimmer (no short: a --model-* short form would prefix-conflict --max-tokens).")
+  s.add_options()(
+      "assistant-confidence-threshold,a", po::value<std::string>(),
+      "Confidence threshold for accepting a speculative (assistant/draft) "
+      "token: "
+      "a draft is accepted only when the main model's probability for it is at "
+      "least this. "
+      "Lower = accept more drafts (faster, riskier), higher = more "
+      "conservative. "
+      "Per-request default (the worker protocol may override per request).")(
+      "chat-template-kwargs", po::value<std::string>(),
+      "Chat-template kwargs as a JSON object passed to the tokenizer's "
+      "apply_chat_template, "
+      "e.g. {\"add_generation_prompt\": true}.")(
+      "enable-thinking", po::value<std::string>(),
+      "The vlm reasoning (thinking) switch: takes true or false (omit for the "
+      "model's own default). "
+      "true enables the reasoner and sets enable_thinking=true in the applied "
+      "chat template; false "
+      "disables the reasoner.  A per-request chat_template_kwargs "
+      "enable_thinking (e.g. over the "
+      "worker stdin) OVERRIDES this flag for that request.  Only meaningful "
+      "for vlm.")("frequency-penalty", po::value<std::string>(),
+                  "Penalty proportional to how often a token has already "
+                  "appeared in the output; "
+                  "0 = no penalty, higher = penalise frequently-repeated "
+                  "tokens by their frequency.")(
+      "max-tokens", po::value<std::string>(),
+      "Maximum number of new tokens to generate before stopping (default "
+      "16384).")("num-assistant-tokens,n", po::value<std::string>(),
+                 "Number of draft ('assistant') tokens produced per "
+                 "speculative-decoding step "
+                 "before they are verified against the main model (used with "
+                 "--assistant-confidence-threshold). Per-request default (the "
+                 "worker protocol may override).")(
+      "presence-penalty", po::value<std::string>(),
+      "Penalty added to the logit of any token that has already appeared in "
+      "the output, "
+      "regardless of how often; 0 = no penalty, higher = penalise reappearing "
+      "tokens (encourages variety).")(
+      "repetition-penalty", po::value<std::string>(),
+      "A logit multiplier for already-generated tokens; 1.0 = no penalty (the "
+      "default), "
+      ">1.0 penalises repeated tokens, <1.0 favours them.")(
+      "seed", po::value<std::string>(),
+      "A random seed for reproducible sampling (the same model / flags / seed "
+      "reproduces the same token sequence).")(
+      "stream", po::value<std::string>(),
+      "Token aggregation for streaming output: how many tokens to fold into "
+      "ONE emitted "
+      "JSON line (default 1 = one line per token).  N>1 aggregates N tokens "
+      "per line; "
+      "N<=0 emits NO mid-stream output and instead writes a single total line "
+      "(all of content / "
+      "reasoning_content / tool_calls that the turn produced) at the end of "
+      "the stream.")("temperature", po::value<std::string>(),
+                     "Sampling temperature as a float > 0 -- higher = more "
+                     "random/uniform, lower = more "
+                     "deterministic; 0 or negative = greedy (deterministic) "
+                     "decoding. Default 1.0.")
+      // Help mirrors the registry (advertisedModelFamilies()); boost's desc arg
+      // is a const char*, so the *validated* set comes from the registry and
+      // this is a literal kept in sync.
+      ("model-family", po::value<std::string>(),
+       "Overwrite for the (usually auto-detected) model family, that is used "
+       "for the output stream parsing. Possible values are qwen35 / hermes / gemma4 / museglimmer")
     ("top-k", po::value<std::string>(),
         "Top-k sampling: only the k highest-probability tokens are considered; 0 disables "
         "top-k (considers all). Default 50 -- so a value is required to turn it off.")

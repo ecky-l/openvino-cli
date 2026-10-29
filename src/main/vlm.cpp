@@ -27,6 +27,7 @@
 // JSON the same robust way, and only feeds the engine strings.
 #include "vlm.hpp"
 
+#include "commands.hpp"               // pipelineListString -- the --pipeline blurb, re-used here
 #include "config.hpp"                 // ConfigError / preProcess / rephraseBoost / compactJsonOf
 #include "util.hpp"                   // base64_decode
 #include "model_load_config.hpp"      // parseModelLoadConfig + ModelLoadConfig
@@ -119,22 +120,22 @@ void addStrMember(std::string& out, const std::string& key, const std::string& v
   out += "\"";
 }
 
-// Remove the vlm-only flags (and, for the value-taking one, its value token)
-// from a copy of args, so the shared section parsers -- which do not know
-// --input / --worker -- will not reject them as "unknown option".  `--input=X` /
-// `-i=X` are dropped whole; `--input X` / `-i X` drop the flag and its one value
-// (unless that value is itself an option); `--worker` is a zero-arg flag, so it
-// is dropped on its own.
+// Remove the vlm-general flags (and, for the value-taking ones, their value
+// token) from a copy of args, so the shared section parsers -- which know neither
+// --input nor --pipeline -- will not reject them as "unknown option".  `--input=X`
+// / `-i=X` / `--pipeline=X` / `-p=X` are dropped whole; the space forms drop the
+// flag and its one value (unless that value is itself an option).  --worker is
+// gone (the `worker` subcommand replaces it), so it needs no stripping here.
 std::vector<std::string> stripVlmArgs(const std::vector<std::string>& args) {
-  static const std::set<std::string> kSingle = {"--input", "-i"};
+  static const std::set<std::string> kSingle = {"--input", "-i", "--pipeline", "-p"};
   std::vector<std::string> out;
   bool afterDashDash = false;
   for (size_t i = 0; i < args.size(); ) {
     const std::string& tok = args[i];
     if (!afterDashDash && tok == "--") { out.push_back(tok); afterDashDash = true; ++i; continue; }
-    if (afterDashDash) { out.push_back(tok); ++i; continue; }  // positionals pass through
-    if (tok == "--worker") { ++i; continue; }   // zero-arg flag; only the first pass knows it
-    if (tok.rfind("--input=", 0) == 0 || tok.rfind("-i=", 0) == 0) {
+    if (afterDashDash) { out.push_back(tok); ++i; continue;  }  // positionals pass through
+    if (tok.rfind("--input=", 0) == 0 || tok.rfind("-i=", 0) == 0 ||
+        tok.rfind("--pipeline=", 0) == 0 || tok.rfind("-p=", 0) == 0) {
       ++i;                                                    // the =form is one token
       continue;
     }
@@ -887,34 +888,47 @@ int runWorker(ov::genai::VLMPipeline& pipe, ov::genai::Tokenizer tokenizer,
 
 }  // close the anonymous namespace
 
-// --- vlm-specific --help: the shared sections + the vlm-only options + a note --
-po::options_description vlmOptionsDesc(bool withWorker, bool& worker);
-std::string vlmHelp(const std::string& prog, bool withWorker) {
+// --- vlm's in-body --help: the shared sections + vlm's general options + a note ---
+// vlm is no longer a subcommand of its own (the run / worker front-end routes here
+// by the --pipeline value), so this --help is a defensive fallback the front-end
+// never reaches; it mirrors the run one-shot's own options (the general section incl.
+// --pipeline + the --input chat) so a body driven straight is still coherent.
+po::options_description vlmOptionsDesc();
+std::string vlmHelp(const std::string& /*prog*/, bool /*worker*/) {
   std::string d;
-  bool worker = false;
-  d += "Usage: " + prog + " vlm [model-dir] <options>\n";
-  d += "  Run a vision-language pipeline (VLMPipeline). One-shot by default;\n";
-  d += "  add --worker for the long-lived piped-worker form.\n\n";
-  d += "A positional <model-dir> is a friend for --model when it is the only\n";
-  d += "model. The input is always a chat the model's template is applied to; it is\n";
-  d += "  taken from --input when given, otherwise from stdin: a pipe -> one line,\n";
-  d += "a terminal -> typed line-by-line, a lone '.' ending it (as in mail).\n";
-  d += "An image part may come from a file (\"file://..\" / ~ / absolute / relative to\n";
-  d += "the CWD) or the built-in base64 / data: form. --input is for one-shot (not\n";
-  d += "the --worker form).\n\n";
+  d += "Usage: <ovgenai> <run|worker> --pipeline vlm [model-dir] <options>\n";
+  d += "  vlm is no longer a subcommand of its own; the pipeline is selected by --pipeline, "
+       "and the run / worker subcommand picks the one-shot vs long-lived form.\n";
+  d += "The input is always a chat the model's template is applied to: --input (the 'run'\n";
+  d += "  one-shot's direct chat) when given, otherwise from stdin -- a pipe -> one (large)\n";
+  d += "  line, a terminal typed until a lone '.' (as in mail).  A 'worker' invocation reads\n";
+  d += "  its line-JSON protocol from stdin instead, so it has no --input.  An image part may\n";
+  d += "  carry a url that is a file (\"file://..\" / ~ / absolute / relative to the CWD) or the\n";
+  d += "  built-in data: / base64 form.\n\n";
   std::ostringstream os;
-  os << vlmOptionsDesc(withWorker, worker);   // boost renders the section
+  os << vlmOptionsDesc();                 // boost renders the section
   d += os.str();
   return d;
 }
 
-po::options_description vlmOptionsDesc(bool withWorker, bool& worker) {
+po::options_description vlmOptionsDesc() {
   po::options_description s("", config::kHelpLineLength, config::kHelpMinDescriptionLength);
   s.add(config::ModelLoadConfig::loadOptionsDesc());
   s.add(config::ModelRuntimeConfig::runtimeOptionsDesc());
   s.add(config::ModelSchedulerConfig::schedulerOptionsDesc());
   s.add(config::ModelRequestConfig::requestOptionsDesc());
+  // The new general parameter: the run / worker front-end routes here by it, so the
+  // body's in-body parse (which tolerates --pipeline, then strips it) knows it too --
+  // reuse the shared one-line-per-pipeline enumeration, so the parse and its --help
+  // cannot drift.  Name / description are C-strings (this boost build's easy_init has
+  // only (const char* name, value, const char* description)): the std::string is held
+  // in a named local and bound via .c_str() (boost copies it inside add_option).
+  const std::string pipelineDesc = ovgenai::commands::pipelineListString();
   s.add_options()
+    ("pipeline,p", po::value<std::string>(), pipelineDesc.c_str())
+    // The special one-shot direct chat (vlm's own surface).  --input is the 'run'
+    // form's; a 'worker' reads its protocol from stdin instead -- that is why the two
+    // are now two subcommands, with no mutual-exclusion between two flags.
     ("input,i", po::value<std::string>(),
         "The chat to run, as a direct (chat-templated) input -- a gen_config JSON"
         " object ({\"messages\":[...], optionally \"tools\" / \"chat_template_kwargs\"}"
@@ -922,39 +936,32 @@ po::options_description vlmOptionsDesc(bool withWorker, bool& worker) {
         " is read from stdin: a pipe yields one (possibly large) line, an interactive"
         " terminal is read a line at a time until a lone '.', the mail command's way."
         " An image part may carry a url that is a file (\"file://..\" / ~ / absolute"
-        " / relative to the CWD) or the built-in data: / base64 form. Mutually"
-        " exclusive with --worker: --input is a one-shot direct chat (no stdin), the"
-        " --worker form reads its protocol from stdin -- they are not both given.");
-  if (withWorker)
-    s.add_options()("worker", po::bool_switch(&worker),
-                     "Run as a long-lived worker subprocess: stay up and read/write"
-                     " the line-JSON protocol on stdin/stdout (GENERATE/PING/CANCEL/"
-                     " UNLOAD -> READY/RESULT/PONG/CANCEL/DONE/ERROR). Omit for a"
-                     " one-shot run. Mutually exclusive with --input: a --worker reads"
-                     " its protocol from stdin, where --input is a one-shot chat that"
-                     " reads no stdin.");
-  else
-    worker = false;
+        " / relative to the CWD) or the built-in data: / base64 form.  --input is the"
+        " 'run' one-shot's direct chat; a 'worker' reads its protocol from stdin instead.");
   s.add_options()("help", po::bool_switch(), "Show this help message");
   return s;
 }
 
-// The one public entry point, registered for the `vlm` subcommand (see
-// commands.cpp).  Signature is (prog, args) (not the stub's (name,desc,prog,a)):
-// the body knows it is "vlm", so the table just forwards (prog, args).
-int runVlm(const std::string& prog, const std::vector<std::string>& args) {
-  const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the "vlm" token
+// The one public entry point -- the body the run / worker front-end reaches by
+// --pipeline vlm (see commands.cpp).  Signature is (prog, args, worker): `args` is
+// the full argv with the run / worker token at index 0 (dropped for the first pass
+// below), and `worker` is the mode the subcommand passed in (run -> one-shot, worker
+// -> long-lived), NOT a --worker flag (that no longer exists).  It does not route;
+// the front-end picked this body from the --pipeline value (vlm).
+int runVlm(const std::string& prog, const std::vector<std::string>& args, bool worker) {
+  const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the run/worker token
   if (anyHelp(sa)) {
-    std::printf("%s", vlmHelp(prog, true).c_str());
+    // The run / worker front-end intercepts --help before delegating, so this is a
+    // defensive fallback only; keep it coherent (vlm's own options, incl. --pipeline).
+    std::printf("%s", vlmHelp(prog, worker).c_str());
     return 0;
   }
 
-  // Parse the vlm-specific options (+ worker bound) as a first pass over the full
-  // argv.  The four shared sections are in the same description so their flags
-  // don't read as "unknown" here; they are re-read (typed) below from a copy with
-  // the vlm-only flags stripped out.
-  bool worker = false;
-  po::options_description desc = vlmOptionsDesc(/*withWorker=*/true, worker);
+  // Parse the vlm-general options as a first pass over the full argv.  The four
+  // shared sections + the general --pipeline + --input are in the same description
+  // so their flags don't read as "unknown" here; the typed configs are re-read below
+  // from a copy with the vlm-general flags (incl. --pipeline) stripped out.
+  po::options_description desc = vlmOptionsDesc();
   po::variables_map vm;
   try {
     po::store(po::command_line_parser(sa).options(desc)
@@ -973,23 +980,15 @@ int runVlm(const std::string& prog, const std::vector<std::string>& args) {
   std::optional<std::string> cliInput =
       vm.count("input") ? std::optional<std::string>(vm["input"].as<std::string>()) : std::nullopt;
 
-  // --input and --worker are two exclusive input surfaces: --input is a one-shot
-  // direct chat (read with no stdin), --worker is the long-lived form that reads
-  // its line-JSON protocol from stdin.  Giving both is a usage error, so reject
-  // it on stderr and exit 1 -- before loading a model, so the rejection needs no
-  // fixture and never starts a run.  (The explicit requirement is exit 1, unlike
-  // the exit 2 that the ConfigError boost/parse errors use further down.)
-  if (worker && cliInput.has_value()) {
-    std::fprintf(stderr, "ovgenai: vlm: --input and --worker are mutually exclusive "
-                        "(give the chat via --input for the one-shot form, or on "
-                        "stdin for the --worker form; not both)\n");
-    return 1;
-  }
+  // --input is the 'run' one-shot's direct chat only: a 'worker' front-end offers
+  // NO --input, so `worker` and a present cliInput never co-occur here -- the
+  // mutual exclusion is now structural (two subcommands), not a two-flag check.
+  // A present cliInput therefore means the run one-shot form.
 
   // Emit the mode+model label up front (mirrors the other pipelines' stub), so
   // the mode is visible on stderr even if a later step (e.g. load) then fails.
   std::fprintf(stderr, "ovgenai: vlm%s: loading model '%s' on %s\n",
-               worker ? " --worker" : " (one-shot)",
+               worker ? " (worker mode)" : " (one-shot)",
                model.c_str(), device.c_str());
 
   try {

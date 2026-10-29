@@ -1,33 +1,37 @@
 // Unit tests for ovgenai's subcommand front-end (src/main/commands.{hpp,cpp}) --
-// the "one subcommand per OpenVINO.GenAI C++ pipeline" surface this build phase
-// introduced: 14 pipeline subcommands (llm / vlm / whisper / asr / tts / omni /
-// embedding / text-embedding / rerank / the image- and video-generation
-// pipelines) plus the `show-config` helper, each rendered by boost as its own
-// --help and dispatched by a single table, every pipeline also taking a valueless
-// --worker switch for the long-lived piped-worker form (omit it for a one-shot run).
+// the new surface this build phase introduced: three subcommands (run / worker /
+// show-config) where the pipeline is now a required, *general* parameter shared by
+// both run and worker -- --pipeline/-p -- replacing the old "one subcommand per
+// pipeline" table and the per-subcommand --worker flag.  The pipeline set (14
+// OpenVINO.GenAI C++ pipelines) is now a list the --pipeline option takes; `run`
+// runs the selected pipeline one-shot, `worker` runs it as the long-lived piped
+// worker, and `show-config` prints the resolved config and loads nothing.
 //
 // Covered here, at the in-process unit level (the companion black-box layer is
 // worker_cli_test.cpp, which drives the built binary):
-//   * the table's shape -- one entry per pipeline (+ the helper), each in the
-//     right category, the pipeline name-set pinned as a snapshot so a dropped /
-//     added pipeline is caught, no duplicate names, no blank blurb;
-//   * the top-level `ovgenai --help` index -- both category headers and every
-//     subcommand name render, plus the USAGE / EXAMPLES framing;
+//   * the subcommand table's shape -- run / worker (category "command") + the
+//     show-config helper (category "helper"), no blank blurb, no duplicate names;
+//     the --pipeline set pinned as a snapshot (via canonicalPipelines()) so a
+//     dropped / added pipeline is caught, and each pipeline spec carries the class
+//     name that backs it (llm -> LLMPipeline, ...);
+//   * the top-level `ovgenai --help` index -- the Commands / Known pipelines /
+//     Helper subcommands sections + USAGE / EXAMPLES framing, every subcommand and
+//     every pipeline named, and the --pipeline / -p selector called out;
 //   * dispatch() contract -- no args -> 2, help/-h/--help -> 0,
 //     version/--version -> 0, an unknown token -> 2 ("unknown command" on stderr);
-//   * each registered subcommand's behaviour -- a valid one-shot / worker run
-//     resolves the model and exits 0 (reporting -- "worker mode" / "one-shot" --
-//     to stderr, the one contract a supervisor would read), and a run missing the
-//     load model or device exits 2.  A pipeline's own --help exits 0 and shows its
-//     --worker switch; a helper's --help shows none.
+//   * the new --pipeline behaviour -- required (a run / worker without it exits 2),
+//     unknown -> 2 naming it; each known pipeline runs one-shot / worker on the
+//     shared load-model surface (vlm, a real body, is exercised end-to-end by the
+//     companion subprocess test); a run / worker --help offers --pipeline (and run
+//     also --input; worker offers neither); a helper's --help offers neither.
 //
-// The stubs write to stdout/stderr via C stdio, so each dispatch is run under an
+// The bodies write to stdout/stderr via C stdio, so each dispatch is run under an
 // in-process fd redirect (dup2 the two stdio streams onto pipes, then drain after
 // the call) -- the same capture a subprocess test needs, but without forking, so
 // it runs inside the test process itself (which links the OpenVINO runtime, as the
 // other unit tests do).  Result codes come from the return value; the mode text is
-// asserted on the drained stderr so a one-shot is provably *not* reported as a
-// worker (the bound-bool pitfall buildOptionsDesc exists to avoid).
+// asserted on the drained stderr so a `run` one-shot is provably *not* reported as
+// a `worker` (the mode now comes from the subcommand, not a misbindable flag).
 #include <algorithm>
 #include <cstddef>
 #include <iterator>
@@ -44,11 +48,11 @@ using namespace ovgenai::commands;
 
 namespace {
 
-// The 14 OpenVINO.GenAI C++ pipelines, one subcommand each, as registered in
-// commands.cpp -- pinned here as the snapshot the "one subcommand per pipeline"
-// deliverable promises.  The snapshot test guards the *set* (order-independent),
-// while the behavioural tests iterate whatever the table actually registers, so an
-// implementation that drops or adds a pipeline trips both.
+// The 14 OpenVINO.GenAI C++ pipelines -- pinned here as the snapshot the
+// --pipeline parameter must offer.  The snapshot test guards the *set* (compared
+// order-independent against canonicalPipelines()), while the behavioural tests
+// iterate canonicalPipelines() itself, so an implementation that drops or adds a
+// pipeline trips both.
 const char* const kPipelineNames[] = {
     "llm", "vlm", "whisper", "asr", "tts", "omni",     "embedding", "text-embedding",
     "rerank", "text2image", "image2image", "inpainting", "text2video", "image2video",
@@ -116,30 +120,34 @@ DispatchResult runDispatch(std::vector<std::string> args) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// The table's shape.
+// The subcommand table's shape: three entries (run / worker / show-config).
 // ---------------------------------------------------------------------------
-TEST(ovgenai_commands, registersOneEntryPerPipelinePlusTheHelper) {
+TEST(ovgenai_commands, registersRunWorkerAndShowConfig) {
   const std::vector<Subcommand>& e = subcommandTable().entries();
-  // 14 pipelines + 1 helper = 15 entries.
-  ASSERT_EQ(e.size(), 15u);
-  std::size_t pipelineCount = 0, helperCount = 0;
+  // 2 command entries (run / worker) + 1 helper (show-config) = 3 entries.
+  ASSERT_EQ(e.size(), 3u);
+  std::size_t commandCount = 0, helperCount = 0;
   for (const Subcommand& s : e) {
-    if (s.name == "show-config") { ++helperCount; EXPECT_EQ(s.category, std::string("helper")); }
-    else { EXPECT_EQ(s.category, std::string("pipeline")); ++pipelineCount; }
+    if (s.name == "show-config") {
+      ++helperCount;
+      EXPECT_EQ(s.category, std::string("helper"));
+    } else if (s.name == "run" || s.name == "worker") {
+      ++commandCount;
+      EXPECT_EQ(s.category, std::string("command"));
+    } else {
+      FAIL() << "unexpected subcommand: " << s.name;
+    }
   }
-  EXPECT_EQ(pipelineCount, kNumPipelines);
+  EXPECT_EQ(commandCount, 2u);
   EXPECT_EQ(helperCount, 1u);
 }
 
-// Snapshot of "one subcommand per OpenVINO.GenAI C++ pipeline": the set of
-// pipeline entries is exactly the 14 expected tokens.  Order-independent, so this
+// Snapshot of the --pipeline set (one entry per OpenVINO.GenAI C++ pipeline): the
+// canonical name-set is exactly the 14 expected tokens.  Order-independent, so this
 // guards the *set* -- a dropped or added pipeline fails it -- without being brittle
-// to a reordering of the table.
+// to a reordering of canonicalPipelines().
 TEST(ovgenai_commands, pipelineNameSetIsEveryGenAIPipeline) {
-  const std::vector<Subcommand>& e = subcommandTable().entries();
-  std::vector<std::string> actual;
-  for (const Subcommand& s : e)
-    if (s.category == "pipeline") actual.push_back(s.name);
+  std::vector<std::string> actual = pipelineNames();
   ASSERT_EQ(actual.size(), kNumPipelines);
   std::vector<std::string> expected(std::begin(kPipelineNames), std::end(kPipelineNames));
   std::sort(expected.begin(), expected.end());
@@ -147,13 +155,14 @@ TEST(ovgenai_commands, pipelineNameSetIsEveryGenAIPipeline) {
   EXPECT_EQ(actual, expected);
 }
 
-TEST(ovgenai_commands, noBlankBlurbAndNoDuplicateNames) {
+TEST(ovgenai_commands, subcommandsAndPipelinesHaveNoBlankBlurbOrDupName) {
+  // The three subcommands: each captioned, no two sharing a name.
   const std::vector<Subcommand>& e = subcommandTable().entries();
   std::vector<std::string> names;
   names.reserve(e.size());
   for (const Subcommand& s : e) {
-    ASSERT_FALSE(s.name.empty());
-    ASSERT_FALSE(s.description.empty());  // every entry is captioned
+    ASSERT_FALSE(s.name.empty()) << "a subcommand has a blank name";
+    ASSERT_FALSE(s.description.empty()) << "a subcommand " << s.name << " has a blank blurb";
     names.push_back(s.name);
   }
   std::sort(names.begin(), names.end());
@@ -161,6 +170,18 @@ TEST(ovgenai_commands, noBlankBlurbAndNoDuplicateNames) {
   for (std::size_t i = 1; i < names.size(); ++i)
     if (names[i] == names[i - 1]) dup = true;
   EXPECT_FALSE(dup) << "two subcommands share a name";
+  // The --pipeline set: each spec captioned, no two pipelines sharing a name.
+  for (const PipelineSpec& p : canonicalPipelines()) {
+    ASSERT_FALSE(p.name.empty());
+    ASSERT_FALSE(p.description.empty()) << "pipeline " << p.name << " has a blank blurb";
+  }
+  std::vector<std::string> pn;
+  for (const PipelineSpec& p : canonicalPipelines()) pn.push_back(p.name);
+  std::sort(pn.begin(), pn.end());
+  bool pdup = false;
+  for (std::size_t i = 1; i < pn.size(); ++i)
+    if (pn[i] == pn[i - 1]) pdup = true;
+  EXPECT_FALSE(pdup) << "two pipelines share a name";
 }
 
 TEST(ovgenai_commands, showConfigIsHelperCategoryAndPipelineCarriesItsClassName) {
@@ -171,28 +192,34 @@ TEST(ovgenai_commands, showConfigIsHelperCategoryAndPipelineCarriesItsClassName)
   ASSERT_NE(sc, nullptr);
   EXPECT_EQ(sc->category, std::string("helper"));
   EXPECT_NE(sc->description.find("Print the resolved load config"), std::string::npos);
-  // a pipeline entry carries the class name that backs it (llm -> LLMPipeline, ...)
-  const Subcommand* llm = nullptr;
-  for (const Subcommand& s : e)
-    if (s.name == "llm") llm = &s;
+  // a pipeline spec carries the class name that backs it (llm -> LLMPipeline, ...)
+  const PipelineSpec* llm = nullptr;
+  for (const PipelineSpec& p : canonicalPipelines())
+    if (p.name == "llm") llm = &p;
   ASSERT_NE(llm, nullptr);
-  EXPECT_EQ(llm->category, std::string("pipeline"));
   EXPECT_NE(llm->description.find("LLMPipeline"), std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
-// The top-level `ovgenai --help` index renders under its two category headers.
+// The top-level `ovgenai --help` index renders its three sections + every entry.
 // ---------------------------------------------------------------------------
-TEST(ovgenai_commands, topLevelHelpRendersBothCategoriesAndEverySubcommand) {
+TEST(ovgenai_commands, topLevelHelpRendersPipelinesAndSubcommands) {
   const std::string usage = subcommandTable().usage("ovgenai");
   EXPECT_NE(usage.find("USAGE:"), std::string::npos);
-  EXPECT_NE(usage.find("Pipeline subcommands"), std::string::npos);
+  EXPECT_NE(usage.find("Commands"), std::string::npos);
+  EXPECT_NE(usage.find("Known pipelines"), std::string::npos);
   EXPECT_NE(usage.find("Helper subcommands"), std::string::npos);
   EXPECT_NE(usage.find("EXAMPLES:"), std::string::npos);
-  // every subcommand is listed (a dropped one would be missing from the index)
+  // the new --pipeline / -p selector is called out in the index
+  EXPECT_NE(usage.find("--pipeline"), std::string::npos);
+  EXPECT_NE(usage.find("-p"), std::string::npos);
+  // each subcommand (indent + token) is listed: a dropped one would be missing
+  EXPECT_NE(usage.find("  run "), std::string::npos);
+  EXPECT_NE(usage.find("  worker "), std::string::npos);
+  EXPECT_NE(usage.find("  show-config "), std::string::npos);
+  // and every pipeline is listed (a dropped one would be missing from the index)
   for (const char* p : kPipelineNames)
-    EXPECT_NE(usage.find(p), std::string::npos) << "missing pipeline subcommand in --help: " << p;
-  EXPECT_NE(usage.find("show-config"), std::string::npos);
+    EXPECT_NE(usage.find(p), std::string::npos) << "missing pipeline in --help: " << p;
 }
 
 // ---------------------------------------------------------------------------
@@ -229,60 +256,104 @@ TEST(ovgenai_commands, unknownCommandExitsTwoAndNamesIt) {
 }
 
 // ---------------------------------------------------------------------------
-// Each registered subcommand's behaviour.  Iterating the table (not the hardcoded
-// set) exercises exactly what the implementation registers; the snapshot test
-// above is the guard that the set is the expected one.
+// The new --pipeline parameter: required, and an unknown one is a 2.
+// ---------------------------------------------------------------------------
+TEST(ovgenai_commands, runWithoutPipelineExitsTwo) {
+  // --pipeline is required (no default -- boost has no clean "required" option, so the
+  // run front-end enforces it the way the model's required set is done).
+  DispatchResult r = runDispatch({"run", "--model", "/opt/m", "--device", "CPU"});
+  EXPECT_EQ(r.rc, 2) << "run without --pipeline should exit 2 (stderr):\n" << r.err;
+  EXPECT_NE(r.err.find("missing required option"), std::string::npos) << r.err;
+  EXPECT_NE(r.err.find("--pipeline"), std::string::npos) << r.err;
+}
+
+TEST(ovgenai_commands, workerWithoutPipelineExitsTwo) {
+  DispatchResult r = runDispatch({"worker", "--model", "/opt/m", "--device", "CPU"});
+  EXPECT_EQ(r.rc, 2) << "worker without --pipeline should exit 2 (stderr):\n" << r.err;
+  EXPECT_NE(r.err.find("missing required option"), std::string::npos) << r.err;
+  EXPECT_NE(r.err.find("--pipeline"), std::string::npos) << r.err;
+}
+
+TEST(ovgenai_commands, unknownPipelineExitsTwoAndNamesIt) {
+  DispatchResult r = runDispatch(
+      {"run", "--pipeline", "frobnicate", "--model", "/opt/m", "--device", "CPU"});
+  EXPECT_EQ(r.rc, 2) << "an unknown --pipeline should exit 2 (stderr):\n" << r.err;
+  EXPECT_NE(r.err.find("unknown pipeline"), std::string::npos) << r.err;
+  EXPECT_NE(r.err.find("frobnicate"), std::string::npos) << r.err;
+  // the choice list a the operator is pointed at names a real pipeline
+  EXPECT_NE(r.err.find("llm"), std::string::npos) << "the error should list the choices: " << r.err;
+}
+
+TEST(ovgenai_commands, workerOffersNoInputFlagButRunDoes) {
+  // --input is a run-only special; the worker subcommand offers no --input (its stdin
+  // is the line-JSON protocol).  Match the bracketed OPTION line, not the prose (which
+  // for the worker says "NO --input"), so the discriminator is the rendered option.
+  DispatchResult wrk = runDispatch({"worker", "--help"});
+  ASSERT_EQ(wrk.rc, 0) << "worker --help";
+  EXPECT_NE(wrk.out.find("--pipeline"), std::string::npos) << "worker --help offers the general --pipeline";
+  EXPECT_EQ(wrk.out.find("[ --input ]"), std::string::npos)
+      << "worker --help must not offer --input:\n" << wrk.out;
+  DispatchResult run = runDispatch({"run", "--help"});
+  ASSERT_EQ(run.rc, 0) << "run --help";
+  // both the general --pipeline and the run-only --input, and the --pipeline blurb
+  // enumerates the pipeline set (so list all pipelines is honoured here)
+  EXPECT_NE(run.out.find("--pipeline"), std::string::npos) << "run --help offers --pipeline";
+  EXPECT_NE(run.out.find("[ --input ]"), std::string::npos) << "run --help offers --input";
+  EXPECT_NE(run.out.find("VLMPipeline"), std::string::npos)
+      << "run --help's --pipeline blurb should list the pipelines: " << run.out;
+}
+
+// ---------------------------------------------------------------------------
+// Each pipeline's behaviour under run / worker, iterating canonicalPipelines().
+// A valid run / worker on the shared load-model surface resolves + exits 0,
+// reporting the mode (now from the subcommand) + the model to stderr; a run /
+// worker missing the load model or device exits 2.  vlm, the first pipeline with a
+// real body (loads a VLMPipeline), cannot take this placeholder /opt/m in a
+// universal loop -- its real one-shot flow is the companion subprocess test in
+// worker_cli_test.cpp -- so it is skipped here (the shape / snapshot / --help tests
+// above still cover it as a --pipeline entry).  A run / worker missing --model /
+// --device does NOT reach the real load: the load config throws before it, so the
+// (vlm-inclusive) missing-field test below needs no fixture.
 // ---------------------------------------------------------------------------
 TEST(ovgenai_commands, everyPipelineRunsOneShotAndWorkerWithModelAndDevice) {
-  const std::vector<Subcommand>& e = subcommandTable().entries();
-  for (const Subcommand& s : e) {
-    if (s.category != "pipeline") continue;
-    // `vlm` is the first pipeline with a real body -- it loads a VLMPipeline and
-    // generates -- so it cannot accept this placeholder /opt/m (which does not
-    // even exist) in a universal loop; its real one-shot + worker flow against the
-    // committed random-weight fixture is exercised by the companion subprocess
-    // test in worker_cli_test.cpp (whose runner redirects stdin to /dev/null, so a
-    // genuine vlm run does not block on a stdin read).  The shape / snapshot /
-    // per-subcommand --help tests still cover vlm as a registered pipeline.
-    if (s.name == "vlm") continue;
-    // a valid one-shot run resolves the model to stderr and exits 0
-    DispatchResult os = runDispatch({s.name, "--model", "/opt/m", "--device", "CPU"});
-    EXPECT_EQ(os.rc, 0) << s.name << " one-shot";
-    EXPECT_NE(os.err.find("(one-shot)"), std::string::npos) << s.name << " one-shot label";
-    EXPECT_NE(os.err.find("/opt/m"), std::string::npos) << s.name << " logs the model it was given";
-    // the same run with --worker exits 0 and (crucially) reports *worker* mode,
-    // proving the bound-bool switch is not a phantom "always set" flag
-    DispatchResult wk = runDispatch({s.name, "--worker", "--model", "/opt/m", "--device", "CPU"});
-    EXPECT_EQ(wk.rc, 0) << s.name << " worker";
-    EXPECT_NE(wk.err.find("(worker mode)"), std::string::npos) << s.name << " worker label";
-    EXPECT_NE(wk.err.find("/opt/m"), std::string::npos) << s.name << " logs the model it was given";
-    // --help for a pipeline exits 0 and shows the --worker switch
-    DispatchResult help = runDispatch({s.name, "--help"});
-    EXPECT_EQ(help.rc, 0) << s.name << " --help";
-    // A pipeline (buildOptionsDesc(true)) offers the --worker switch.  Match its
-    // distinctive description, not the bare "--worker" token: the shared help note
-    // also mentions "--worker-max-respawns" (for every subcommand), which would trip
-    // a naive search for "--worker".
-    EXPECT_NE(help.out.find("Run as a long-lived worker subprocess"), std::string::npos)
-        << s.name << " --help should offer the --worker switch";
+  for (const PipelineSpec& p : canonicalPipelines()) {
+    if (p.name == "vlm") continue;  // real body needs a fixture; exercised elsewhere
+    // `run --pipeline <p>` (one-shot) resolves the model to stderr and exits 0
+    DispatchResult os = runDispatch(
+        {"run", "--pipeline", p.name, "--model", "/opt/m", "--device", "CPU"});
+    EXPECT_EQ(os.rc, 0) << p.name << " run one-shot (stderr):\n" << os.err;
+    EXPECT_NE(os.err.find("(one-shot)"), std::string::npos) << p.name << " one-shot label";
+    EXPECT_NE(os.err.find("/opt/m"), std::string::npos) << p.name << " logs the model it was given";
+    // `worker --pipeline <p>` exits 0 and (crucially) reports *worker* mode, proving
+    // the mode comes from the subcommand, not a phantom always-set flag
+    DispatchResult wk = runDispatch(
+        {"worker", "--pipeline", p.name, "--model", "/opt/m", "--device", "CPU"});
+    EXPECT_EQ(wk.rc, 0) << p.name << " worker (stderr):\n" << wk.err;
+    EXPECT_NE(wk.err.find("(worker mode)"), std::string::npos) << p.name << " worker label";
+    EXPECT_NE(wk.err.find("/opt/m"), std::string::npos) << p.name << " logs the model it was given";
   }
 }
 
-TEST(ovgenai_commands, pipelineMissingModelOrDeviceExitsTwo) {
-  const std::vector<Subcommand>& e = subcommandTable().entries();
-  for (const Subcommand& s : e) {
-    if (s.category != "pipeline") continue;
-    DispatchResult missModel = runDispatch({s.name, "--device", "CPU"});
-    EXPECT_EQ(missModel.rc, 2) << s.name << " missing --model";
-    EXPECT_NE(missModel.err.find("missing required"), std::string::npos) << s.name;
-    DispatchResult missDevice = runDispatch({s.name, "--model", "/opt/m"});
-    EXPECT_EQ(missDevice.rc, 2) << s.name << " missing --device";
-    EXPECT_NE(missDevice.err.find("missing required"), std::string::npos) << s.name;
+TEST(ovgenai_commands, runOrWorkerMissingModelOrDeviceExitsTwo) {
+  for (const PipelineSpec& p : canonicalPipelines()) {
+    // The front-end routes a known --pipeline to the body, which mirrors the load
+    // config's required set (model / device) -> a clean ConfigError (exit 2) before
+    // any real load, so even vlm (a real body) yields 2 here without a fixture.
+    DispatchResult missModel = runDispatch(
+        {"run", "--pipeline", p.name, "--device", "CPU"});
+    EXPECT_EQ(missModel.rc, 2) << p.name << " run missing --model";
+    EXPECT_NE(missModel.err.find("missing required"), std::string::npos) << p.name;
+    DispatchResult missDevice = runDispatch(
+        {"run", "--pipeline", p.name, "--model", "/opt/m"});
+    EXPECT_EQ(missDevice.rc, 2) << p.name << " run missing --device";
+    EXPECT_NE(missDevice.err.find("missing required"), std::string::npos) << p.name;
   }
 }
 
-// `show-config` is a helper (no --worker) whose resolve-and-print job is to print
-// the JSON of what resolved and exit 0, or exit 2 on a config error.
+// `show-config` is a helper (no --pipeline / --input / --worker) whose resolve-and-
+// print job is to print the JSON of what resolved and exit 0, or exit 2 on a config
+// error; its --help shows the four shared config sections but neither the run/worker
+// general --pipeline nor the run-only --input.
 TEST(ovgenai_commands, showConfigResolvesAndPrintsJsonExitZero) {
   DispatchResult r = runDispatch({"show-config", "--model", "./tiny-gpt2-ov", "--device", "CPU"});
   ASSERT_EQ(r.rc, 0);
@@ -296,15 +367,15 @@ TEST(ovgenai_commands, showConfigMissingModelExitsTwo) {
 }
 
 // A subcommand's --help does not require the model (anyHelp short-circuits before
-// parsing), and a helper's help shows no --worker line (only pipelines do).
-TEST(ovgenai_commands, showConfigHelpExitsZeroWithoutModelAndWithoutWorker) {
+// parsing); a helper's help offers neither --pipeline (a run/worker general
+// parameter) nor --input (a run special) -- match the bracketed option line, not the
+// prose, so the answer is "the option is simply absent", not a phrase match.
+TEST(ovgenai_commands, showConfigHelpExitsZeroWithoutModelAndWithoutPipelineOrInput) {
   DispatchResult r = runDispatch({"show-config", "--help"});
   ASSERT_EQ(r.rc, 0);
   EXPECT_NE(r.out.find("Model load parameters"), std::string::npos);
-  // A helper (buildOptionsDesc(false)) offers no --worker switch.  Again match the
-  // distinctive description, not the token: the shared help note mentions
-  // "--worker-max-respawns" for every subcommand, so a bare "--worker" search would
-  // spuriously match a helper's help even while the switch itself is correctly absent.
-  EXPECT_EQ(r.out.find("Run as a long-lived worker subprocess"), std::string::npos)
-      << "a helper shows no --worker switch";
+  EXPECT_EQ(r.out.find("[ --pipeline ]"), std::string::npos)
+      << "a helper's --help offers no --pipeline option:\n" << r.out;
+  EXPECT_EQ(r.out.find("[ --input ]"), std::string::npos)
+      << "a helper's --help offers no --input option:\n" << r.out;
 }
