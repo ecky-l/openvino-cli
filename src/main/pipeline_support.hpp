@@ -28,7 +28,8 @@
 #include <functional>      // std::function (PipelineBinding::run)
 #include <optional>        // std::optional (PipelineParsed::input -- nullopt for a worker)
 #include <string>
-#include <unordered_map>   // the registry: name -> PipelineBinding
+#include <unordered_map>   // std::unordered_map (the registry table; built in pipeline_support.cpp)
+
 
 #include "model_load_config.hpp"      // config::ModelLoadConfig
 #include "model_runtime_config.hpp"   // config::ModelRuntimeConfig
@@ -70,25 +71,28 @@ struct PipelineParsed {
 
 namespace commands {
 
-// One CLI pipeline binding: the operator-facing --pipeline token, the one-line blurb (the text
-// the show-pipelines listing renders), and the run/worker body.  The body now receives the PARSED
-// arguments runModeEntry produced ONCE (a PipelineParsed) + the program name (for its usage/labels)
-// + the subcommand-derived mode (false == `run` one-shot, true == `worker` long-lived) and does
-// the create-pipeline + run/worker for its pipeline -- without parsing the command line itself.
+// One CLI pipeline binding: the operator-facing --pipeline token (the registry's lookup key)
+// + the run/worker body.  The body receives the PARSED arguments runModeEntry produced once
+// (a PipelineParsed) + the program name + the subcommand-derived mode -- and does NOT parse the
+// command line itself.  It carries ONLY its name: the one-line descriptions stay in the canonical
+// name set (it feeds show-pipelines + the "choose one of" routing message), so this table is name
+// + body only, and does not duplicate them.
 struct PipelineBinding {
   std::string name;
-  std::string description;
   std::function<int(const std::string& /*prog*/,
                    const PipelineParsed& /*parsed*/,
                    bool /*worker*/)> run;
 };
 
-// The registry: one binding per canonical pipeline (run/worker select by the --pipeline value),
-// keyed by name in a std::unordered_map so routing is a single lookup (a find) -- not a linear
-// scan over the set (the requested change from a std::vector).  `vlm` returns a real body (load a
-// VLMPipeline, run it through a SessionDispatcher); the rest return the infrastructure-only stub
-// (kept in commands.cpp; here the registry merely references commands::runPipelineStub for them).
-const std::unordered_map<std::string, PipelineBinding>& pipelineBindings();
+// run / worker's single delegated entry point (defined in pipeline_support.cpp): it looks the
+// selected --pipeline up by name in the registry's file-local static const table and runs that
+// binding's body -- so runModeEntry no longer looks up nor routes a pipeline itself; it parses the one
+// argument set exactly once (into a PipelineParsed) and then calls this.  An unknown --pipeline is a
+// usage error -- named + the operator pointed at show-pipelines (the canonical set via pipelineNames(),
+// the same text that listing renders) + exit 2; a valid one runs the bound body and its exit code (0
+// ok / 1 a run failure / 2 a usage failure) is returned straight to the caller.
+int dispatchPipeline(const std::string& modeName, const std::string& prog,
+                     const PipelineParsed& parsed, bool worker);
 
 }  // namespace commands
 }  // namespace ovgenai

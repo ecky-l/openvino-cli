@@ -23,7 +23,8 @@
 #include "model_runtime_config.hpp"      // parseModelRuntimeConfig + runtimeOptionsDesc
 #include "model_scheduler_config.hpp"    // parseModelSchedulerConfig + schedulerOptionsDesc
 #include "model_request_config.hpp"      // parseModelRequestConfig + requestOptionsDesc
-#include "pipeline_support.hpp"      // PipelineParsed + PipelineBinding + pipelineBindings() (a map): a body is HANDED the parsed args (runModeEntry parsed them once)
+#include "pipeline_support.hpp"      // PipelineParsed + the registry (PipelineBinding + dispatchPipeline): runModeEntry parses once, then defers look-up + execute to it
+
 
 #include "ovgenai_config.h"              // OVGENAI_VERSION
 
@@ -411,42 +412,33 @@ int runModeEntry(const std::string& prog, const std::vector<std::string>& args, 
     return 2;
   }
 
-  // Route by --pipeline.  The registry is a map keyed by name, so this is a single lookup
-  // (a find) -- not a linear scan over the set.  A bad --pipeline name (not in the set) is a usage
-  // error: name it, point the operator at show-pipelines, exit 2.
-  const std::string pipeline = vm["pipeline"].as<std::string>();
-  const auto& binds = pipelineBindings();
-  const auto it = binds.find(pipeline);
-  if (it == binds.end()) {
-    std::fprintf(stderr, "ovgenai: %s: unknown pipeline '%s'; choose one of: %s\n",
-                 modeName.c_str(), pipeline.c_str(),
-                 config::joinList(pipelineNames(), ", ").c_str());
-    return 2;
-  }
-
-  // The pipeline is a known, valid body -- so parse its arguments now, ONCE, here, in the front-end
-  // (the requested change: the bodies no longer parse; runModeEntry does it one single time and hands
-  // the body the result, a PipelineParsed).  parsePipelineArgs folds the one combined parse above (vm)
-  // -- from which it lifts the run-only --input -- plus the four typed sections, each re-read once on a
-  // copy of the argv with the general routing flags (the --pipeline that selected this body, and --input
-  // for a run; -- not for a worker) stripped off (so the section parsers, who know neither, accept the
-  // line).  It is run AFTER the route so an unknown pipeline (above) errors first: a missing --model on
-  // an *unknown* pipeline never trips the load parser.  A genuine config error here (a valid body, but a
-  // missing/invalid argument) is the front-end's to report -- it names the (now known) pipeline -- and
-  // a usage failure is exit 2.
+  // Route to the selected pipeline -- but NOT inline: both the look-up (find in the registry
+  // table) and the execute (run that binding's body) now live in the registry layer -- the
+  // dispatchPipeline over kPipelineBindings (a file-local static const, in pipeline_support.cpp) --
+  // so runModeEntry only does the front-end's job: parse the one combined argument set (the general
+  // section + the four typed layers) exactly once, into a PipelineParsed, and hand it to
+  // dispatchPipeline (then return its code).  runModeEntry itself can no longer report an *unknown*
+  // pipeline -- it cannot know which --pipeline names are valid (that is the registry's job and the
+  // test suite keeps the two sets in lock-step, see that .cpp) -- so it reports only what is in its
+  // own authority: the missing required --pipeline (checked just above) + a config miss of a body that
+  // IS valid (through the parse, below); dispatchPipeline names + rejects the unknown ones.
   PipelineParsed parsed;
   try {
     parsePipelineArgs(sa, vm, parsed);
   } catch (const config::ConfigError& e) {
-    std::fprintf(stderr, "ovgenai: %s: %s\n", it->first.c_str(), e.what());
+    // A usage error from a VALID body's argument parse -- e.g. a missing --model a body requires -- on
+    // a pipeline dispatchPipeline accepts: name it via the --pipeline value the one parse just lifted
+    // (parsePipelineArgs sets parsed.pipeline from the combined vm first, before any section parser can
+    // throw, so it is known here even when the load section then fails), and exit 2 (a usage failure).
+    std::fprintf(stderr, "ovgenai: %s: %s\n", parsed.pipeline.c_str(), e.what());
     return 2;
   }
 
-  // Hand the bound body its program name + the PARSED arguments + the subcommand-derived mode -- the
-  // body neither re-parses the command line nor needs the raw argv (that is what was dropped).  vlm
-  // creates its engine pipeline and runs it through a SessionDispatcher; the others are the
-  // infrastructure-only stub.
-  return it->second.run(prog, parsed, worker);
+  // Hand the (now known, valid) body its program name + the PARSED arguments + the subcommand-derived
+  // mode -- the body neither re-parses the command line nor needs the raw argv at all.  dispatchPipeline
+  // does the find + the run, over its file-local table; its exit code (0 ok / 1 a run failure / 2 a
+  // usage failure) is returned straight back to the caller.
+  return dispatchPipeline(modeName, prog, parsed, worker);
 
 }
 

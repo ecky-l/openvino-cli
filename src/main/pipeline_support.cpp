@@ -7,7 +7,7 @@
 //   * its per-request generate -- the vlm-specific "the produce + emit" -- now injected into the
 //     session-agnostic SessionDispatcher (session_support.{hpp,cpp}) as the run/worker driver the
 //     dispatcher runs against a selected session's ChatHistory.
-// It also builds the registry (pipelineBindings): vlm -> runVlmBody; the 13 not-yet-implemented
+// It also builds the registry (kPipelineBindings): vlm -> runVlmBody; the 13 not-yet-implemented
 // pipelines share the infrastructure-only stub (kept in commands.cpp -- it is front-end infra,
 // not a pipeline body -- so the front-end's real --help stays the single source of truth there and
 // this TU only references commands::runPipelineStub for it).
@@ -690,35 +690,71 @@ int runVlmBody(const std::string& prog, const PipelineParsed& args, bool worker)
 
 }  // namespace ovgenai
 
-// --- The pipeline registry --------------------------------------------------------
-// One binding per canonical pipeline, keyed by name in a MAP -- so run / worker route by a single
-// lookup (a find), not a linear scan over the set (the requested change from a vector).  `vlm` is the
-// first pipeline with a real body (its runVlmBody creates a VLMPipeline and binds it to a
-// SessionDispatcher); the rest share the infrastructure-only stub (kept in commands.cpp -- it is
-// front-end infra -- so the front-end's real --help stays the single source of truth there, and this
-// TU only references commands::runPipelineStub for them).  Each body now receives the PARSED
-// PipelineParsed runModeEntry produced ONCE (it takes (prog, const PipelineParsed&, worker)); the
-// vlm body + the stub no longer re-parse the command line -- a future body plugs in here unchanged.
+// --- The pipeline registry --------------------------------------------------------------
+// The run/worker binding table, as a file-local `static const` map keyed by the --pipeline name
+// (runModeEntry no longer builds or scans it: it parses the one argument set exactly once, then calls
+// dispatchPipeline, which looks it up by name -- a single find, not a linear scan over the set).
+// Each entry says ONLY which body runs that pipeline -- NOT its description: the descriptions stay in
+// the canonical name set (it feeds show-pipelines + the "choose one of" routing message), so this
+// table carries no descriptions.  (A name in the table but missing from the canonical set -- or
+// vice-versa -- would show up at run time: the everyPipeline test runs every canonical pipeline by
+// name and expects exit 0, so the two sets stay in lock-step.)
+//
+// Each entry's body is set EXPLICITLY (one line each) -- NOT built in a loop with an `if`: `vlm`
+// (the one pipeline with a real body today) is its own lambda that drives runVlmBody; the other
+// thirteen not-yet-implemented pipelines share one lambda onto runPipelineStub (the infrastructure-only
+// stub the front-end owns as the single --help source).  When a pipeline grows a real body, only its
+// one entry changes -- no shared stub code, no per-name `if`.
 namespace ovgenai {
 namespace commands {
 
-const std::unordered_map<std::string, PipelineBinding>& pipelineBindings() {
-  static const std::unordered_map<std::string, PipelineBinding> b = [] {
-    std::unordered_map<std::string, PipelineBinding> v;
-    v.reserve(canonicalPipelines().size());
-    for (const auto& p : canonicalPipelines()) {
-      const std::string nm = p.name;
-      const std::string d  = p.description;
-      v.emplace(nm, PipelineBinding{nm, d,
-        [nm](const std::string& prog, const PipelineParsed& parsed, bool worker) {
-          if (nm == "vlm")
-            return ::ovgenai::runVlmBody(prog, parsed, worker);   // vlm: the first real body (loads + generates)
-          return runPipelineStub(nm, parsed, worker);             // the not-yet-implemented stubs
-        }});
-    }
-    return v;
-  }();
-  return b;
+// The single shared body for the not-yet-implemented pipelines: runPipelineStub, fed the pipeline name
+// it just ran (parsed.pipeline) so the stub can name itself; the rest of its report comes from the
+// parsed model / device.  One lambda, referenced by every non-vlm entry below.
+static const std::function<int(const std::string&, const PipelineParsed&, bool)>
+  runPipelineStubBody =
+    [](const std::string& prog, const PipelineParsed& parsed, bool worker) -> int {
+      return runPipelineStub(parsed.pipeline, parsed, worker);
+    };
+
+// The table itself (the requested "assign as static const ... we don't need a function at all"):
+// one explicit entry per canonical pipeline -- `vlm` its own lambda (runVlmBody); the other thirteen
+// share runPipelineStub above.  An entry stores only its name + its body (a PipelineBinding is a
+// { name, run } pair): the name is the lookup key, run is the body dispatchPipeline forwards to with
+// the parsed arguments + the program name + the mode.
+static const std::unordered_map<std::string, PipelineBinding> kPipelineBindings = {
+  { "llm",            { "llm",            runPipelineStubBody } },
+  { "vlm",            { "vlm",            [](const std::string& prog, const PipelineParsed& parsed, bool worker) -> int { return ::ovgenai::runVlmBody(prog, parsed, worker); } } },
+  { "whisper",        { "whisper",        runPipelineStubBody } },
+  { "asr",            { "asr",            runPipelineStubBody } },
+  { "tts",            { "tts",            runPipelineStubBody } },
+  { "omni",           { "omni",           runPipelineStubBody } },
+  { "embedding",      { "embedding",      runPipelineStubBody } },
+  { "text-embedding", { "text-embedding", runPipelineStubBody } },
+  { "rerank",         { "rerank",         runPipelineStubBody } },
+  { "text2image",     { "text2image",     runPipelineStubBody } },
+  { "image2image",    { "image2image",    runPipelineStubBody } },
+  { "inpainting",     { "inpainting",     runPipelineStubBody } },
+  { "text2video",     { "text2video",     runPipelineStubBody } },
+  { "image2video",    { "image2video",    runPipelineStubBody } },
+};
+
+// run / worker's single delegated entry point: look the selected --pipeline up by name (a single find
+// over kPipelineBindings) and run that binding's body -- so runModeEntry neither looks up nor routes a
+// pipeline itself; it parses the one argument set exactly once, then calls this.  If the name is not
+// in the table (unknown --pipeline) it is a usage error: named + pointed at show-pipelines (the
+// canonical set via pipelineNames(), the same text that listing renders) + exit 2.  A hit runs the
+// bound body and its exit code (0 ok / 1 a run failure / 2 a usage failure) is returned.
+int dispatchPipeline(const std::string& modeName, const std::string& prog,
+                     const PipelineParsed& parsed, bool worker) {
+  const auto it = kPipelineBindings.find(parsed.pipeline);
+  if (it == kPipelineBindings.end()) {
+    std::fprintf(stderr, "ovgenai: %s: unknown pipeline '%s'; choose one of: %s\n",
+                 modeName.c_str(), parsed.pipeline.c_str(),
+                 config::joinList(pipelineNames(), ", ").c_str());
+    return 2;
+  }
+  return it->second.run(prog, parsed, worker);
 }
 
 }  // namespace commands
