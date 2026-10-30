@@ -23,13 +23,15 @@
 #include "model_runtime_config.hpp"      // parseModelRuntimeConfig + runtimeOptionsDesc
 #include "model_scheduler_config.hpp"    // parseModelSchedulerConfig + schedulerOptionsDesc
 #include "model_request_config.hpp"      // parseModelRequestConfig + requestOptionsDesc
-#include "vlm.hpp"                        // runVlm -- the first (and, for now, only) real body
+#include "pipeline_support.hpp"      // PipelineParsed + PipelineBinding + pipelineBindings() (a map): a body is HANDED the parsed args (runModeEntry parsed them once)
 
 #include "ovgenai_config.h"              // OVGENAI_VERSION
 
 #include <algorithm>
 #include <cstdio>
 #include <functional>
+#include <optional>
+#include <set>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -316,118 +318,65 @@ int runShowPipelines(const std::string& prog, const std::vector<std::string> arg
   return 0;
 }
 
-// The infrastructure-only body shared by every pipeline that has not yet grown a
-// real one: it is reached (for both `run` and `worker`) with the routed call whose
-// argv[0] is the `run`/`worker` token and whose remaining tokens still carry the
-// general --pipeline it was routed by -- so it drops token 0 and parses the general
-// section + the four named sections with boost (tolerating both --pipeline and
-// --input via generalOptionsDesc, the way the old stub tolerated --worker) and then
-// confirms the load model is specified (the one contract a worker must keep before
-// going up), mirrors it to stderr, like a supervisor would log it (stdout is
-// reserved for the future result / protocol channel), and exits 0.  The real
-// <Pipeline> body (load + one-shot / worker loop) lands per pipeline later; nothing
-// here touches OpenVINO.
-int runPipelineStub(const std::string& name, const std::string& /*desc*/,
-                    const std::string& /*prog*/, const std::vector<std::string>& args,
-                    bool worker) {
-  const std::vector<std::string> sa(args.begin() + 1, args.end());  // drop the run/worker token
-  if (anyHelp(sa)) {  // the front-end intercepts --help before delegating, so this is
-    // only a defensive fallback if a body were ever driven straight; keep it coherent
-    // (the general section + four sections) rather than the deleted --worker switch.
-    bool unused = false; (void) unused;
-    std::printf("%s", subcommandHelp("", name, /*isRunForm=*/!worker).c_str());
-    return 0;
-  }
-  try {
-    const config::PreProcessed pp = config::preProcess(sa);
-    if (pp.positionalCount > 1) {
-      throw config::ConfigError(
-          "only one positional (the model path) may be given; found " +
-          std::to_string(pp.positionalCount) +
-          ". ovgenai loads exactly one model -- set it with --model");
+
+// --- Argument parsing, made GENERAL -- and lived in the front-end (runModeEntry), not the bodies --
+// Two free helpers (used only by runModeEntry, so they stay file-local here):
+//   * stripRoutingArgs -- the one thing the four typed section parsers (load / runtime / scheduler /
+//     request) do NOT recognise: the general routing flags (--pipeline / -p, and the run form's
+//     --input / -i).  Removing them (for the value-taking forms, their one trailing value too, unless
+//     that value is itself an option) from a copy is what lets each section parser -- who know only
+//     their own flags -- accept the line; a bare positional (it becomes --model inside the parser) and
+//     everything after a `--` pass through.  General -- it discards only the general routing flags, so
+//     no body is any closer to the parser than the next.
+//   * parsePipelineArgs -- THE single general parse: from the one combined `vm` already stored above it
+//     lifts --pipeline (to re-confirm) and the run form's --input (nullopt for a worker), and fills the
+//     four typed config structs each from a routing-flag-stripped copy of the argv (they each do their
+//     own cheap boost pass; the cost is the model LOAD, not the parse).  A missing/invalid model / device
+//     surfaces as a ConfigError from the load parser -- runModeEntry reports it (naming the now-known
+//     pipeline) and exits 2.
+std::vector<std::string> stripRoutingArgs(const std::vector<std::string>& args) {
+  static const std::set<std::string> kSingle = {"--input", "-i", "--pipeline", "-p"};
+  std::vector<std::string> out;
+  bool afterDashDash = false;
+  for (std::size_t i = 0; i < args.size(); ) {
+    const std::string& tok = args[i];
+    if (!afterDashDash && tok == "--") { out.push_back(tok); afterDashDash = true; ++i; continue; }
+    if (afterDashDash) { out.push_back(tok); ++i; continue; }  // positionals pass through
+    if (tok.rfind("--input=", 0) == 0 || tok.rfind("-i=", 0) == 0 ||
+        tok.rfind("--pipeline=", 0) == 0 || tok.rfind("-p=", 0) == 0) {
+      ++i;                                                     // the =form is one token
+      continue;
     }
-    std::vector<std::string> cleanArgs = pp.args;
-    cleanArgs.erase(std::remove(cleanArgs.begin(), cleanArgs.end(), std::string("-")),
-                    cleanArgs.end());
-
-    // The general section (untitled root: --pipeline + the run form's --input) plus
-    // the four named sections.  The stub reads only model / device from the map;
-    // generalOptionsDesc(true) keeps --input "known" so a routed run that also passed
-    // --input is not rejected (a worker route never carries --input anyway).
-    po::options_description desc = generalOptionsDesc(/*isRunForm=*/true);
-    po::positional_options_description posDesc;
-    posDesc.add("model", 1);  // a lone positional binds to --model
-
-    po::variables_map vm;
-    try {
-      po::store(po::command_line_parser(cleanArgs)
-                     .options(desc)
-                     .positional(posDesc)
-                     .style(po::command_line_style::unix_style)
-                     .run(),
-                vm);
-      po::notify(vm);
-    } catch (const po::error& e) {
-      throw config::rephraseBoost(e);
+    if (kSingle.count(tok)) {
+      if (i + 1 < args.size()) {
+        const std::string& nx = args[i + 1];
+        if (!(nx.size() > 1 && nx[0] == '-')) ++i;             // consume its (space) value
+      }
+      ++i;
+      continue;
     }
-
-    // Mirror the load config's required set (model / device): a run must not even
-    // go up without them.  (--pipeline is required too, but that is enforced by the
-    // run / worker front-end that routed here, so a body is never reached without it.)
-    std::vector<std::string> missing;
-    if (!vm.count("model")) missing.push_back("--model");
-    if (!vm.count("device")) missing.push_back("--device");
-    if (!missing.empty())
-      throw config::ConfigError("missing required load option(s): "
-                                + config::joinList(missing, ", "));
-
-    // The model a supervisor would log (stdout is reserved for the future result /
-    // protocol channel); the (worker mode) / (one-shot) label names the form so a
-    // run is provably *not* reported as the other.
-    const std::string model   = vm["model"].as<std::string>();
-    const std::string device  = vm.count("device") ? vm["device"].as<std::string>() : std::string();
-    std::fprintf(stderr,
-                 "ovgenai: %s%s: not yet implemented (this build is "
-                 "infrastructure only); would %s model '%s' on '%s'\n",
-                 name.c_str(),
-                 worker ? " (worker mode)" : " (one-shot)",
-                 worker ? "run it as a worker for" : "run a one-shot for",
-                 model.c_str(), device.c_str());
-    return 0;
-  } catch (const config::ConfigError& e) {
-    std::fprintf(stderr, "ovgenai: %s: %s\n", name.c_str(), e.what());
-    return 2;
+    out.push_back(tok);
+    ++i;
   }
+  return out;
 }
 
-// --- Pipeline routing: a name -> the body that runs it -------------------------
-struct PipelineBinding {
-  std::string name;
-  std::string desc;
-  std::function<int(const std::string& /*prog*/, const std::vector<std::string>& /*args*/,
-                    bool /*worker*/)> run;
-};
-
-// Build the router from the canonical set, binding each name to its body: `vlm` is
-// the first pipeline with a real body (loads a VLMPipeline and generates), the rest
-// share the infrastructure-only stub (the per-pipeline lambda the old front-end used,
-// now keyed off the --pipeline value instead of a subcommand name).
-const std::vector<PipelineBinding>& pipelineBindings() {
-  static const std::vector<PipelineBinding> b = [] {
-    std::vector<PipelineBinding> v;
-    for (const auto& p : canonicalPipelines()) {
-      const std::string nm = p.name;
-      const std::string d  = p.description;
-      v.push_back(PipelineBinding{nm, d,
-        [nm, d](const std::string& prog, const std::vector<std::string>& a, bool worker) {
-          if (nm == "vlm")
-            return ovgenai::runVlm(prog, a, worker);   // vlm is the first real body
-          return runPipelineStub(nm, d, prog, a, worker);
-        }});
-    }
-    return v;
-  }();
-  return b;
+// Build a body's PipelineParsed from runModeEntry's one combined parse (vm) + the raw argv (sa):
+// the small things a body may log / the run form's direct chat are lifted straight from vm; the four
+// typed sections are each re-read once on a routing-flag-stripped copy of the argv.
+void parsePipelineArgs(const std::vector<std::string>& sa,
+                       const po::variables_map& vm,
+                       PipelineParsed& out) {
+  out.pipeline = vm.count("pipeline") ? vm["pipeline"].as<std::string>() : std::string();
+  out.model    = vm.count("model")    ? vm["model"].as<std::string>()    : std::string();
+  out.device   = vm.count("device")   ? vm["device"].as<std::string>()    : std::string();
+  out.input    = vm.count("input")    ? std::optional<std::string>(vm["input"].as<std::string>())
+                                       : std::nullopt;
+  const std::vector<std::string> bodyArgs = stripRoutingArgs(sa);
+  out.load      = config::parseModelLoadConfig(bodyArgs);
+  out.runtime   = config::parseModelRuntimeConfig(bodyArgs);
+  out.scheduler = config::parseModelSchedulerConfig(bodyArgs);
+  out.request   = config::parseModelRequestConfig(bodyArgs);
 }
 
 int runModeEntry(const std::string& prog, const std::vector<std::string>& args, bool worker) {
@@ -462,23 +411,78 @@ int runModeEntry(const std::string& prog, const std::vector<std::string>& args, 
     return 2;
   }
 
-  // Route: the --pipeline value picks the body; the body re-parses the (unchanged)
-  // argv, so the bodies themselves are untouched -- only the token that *selected*
-  // them changed (a --pipeline value, not a subcommand name) and the mode now comes
-  // from WHICH subcommand dispatched (run -> one-shot, worker -> long-lived) instead
-  // of a --worker flag.  The full args (their run/worker token at index 0) are
-  // forwarded verbatim: the body drops index 0 for its own options.
+  // Route by --pipeline.  The registry is a map keyed by name, so this is a single lookup
+  // (a find) -- not a linear scan over the set.  A bad --pipeline name (not in the set) is a usage
+  // error: name it, point the operator at show-pipelines, exit 2.
   const std::string pipeline = vm["pipeline"].as<std::string>();
-  for (const auto& bind : pipelineBindings())
-    if (bind.name == pipeline)
-      return bind.run(prog, args, worker);
-  std::fprintf(stderr, "ovgenai: %s: unknown pipeline '%s'; choose one of: %s\n",
-               modeName.c_str(), pipeline.c_str(),
-               config::joinList(pipelineNames(), ", ").c_str());
-  return 2;
+  const auto& binds = pipelineBindings();
+  const auto it = binds.find(pipeline);
+  if (it == binds.end()) {
+    std::fprintf(stderr, "ovgenai: %s: unknown pipeline '%s'; choose one of: %s\n",
+                 modeName.c_str(), pipeline.c_str(),
+                 config::joinList(pipelineNames(), ", ").c_str());
+    return 2;
+  }
+
+  // The pipeline is a known, valid body -- so parse its arguments now, ONCE, here, in the front-end
+  // (the requested change: the bodies no longer parse; runModeEntry does it one single time and hands
+  // the body the result, a PipelineParsed).  parsePipelineArgs folds the one combined parse above (vm)
+  // -- from which it lifts the run-only --input -- plus the four typed sections, each re-read once on a
+  // copy of the argv with the general routing flags (the --pipeline that selected this body, and --input
+  // for a run; -- not for a worker) stripped off (so the section parsers, who know neither, accept the
+  // line).  It is run AFTER the route so an unknown pipeline (above) errors first: a missing --model on
+  // an *unknown* pipeline never trips the load parser.  A genuine config error here (a valid body, but a
+  // missing/invalid argument) is the front-end's to report -- it names the (now known) pipeline -- and
+  // a usage failure is exit 2.
+  PipelineParsed parsed;
+  try {
+    parsePipelineArgs(sa, vm, parsed);
+  } catch (const config::ConfigError& e) {
+    std::fprintf(stderr, "ovgenai: %s: %s\n", it->first.c_str(), e.what());
+    return 2;
+  }
+
+  // Hand the bound body its program name + the PARSED arguments + the subcommand-derived mode -- the
+  // body neither re-parses the command line nor needs the raw argv (that is what was dropped).  vlm
+  // creates its engine pipeline and runs it through a SessionDispatcher; the others are the
+  // infrastructure-only stub.
+  return it->second.run(prog, parsed, worker);
+
 }
 
 }  // close the anonymous namespace of this file's front-end helpers
+
+// --- Infrastructure-only body -- the not-yet-implemented pipelines' shared stub ---------
+// It receives the PARSED arguments (a PipelineParsed) runModeEntry already produced ONCE for the
+// whole invocation (and reported the route + any usage error at the front-end) -- so the stub
+// neither parses the command line nor needs the raw argv, and it never even sees a --help
+// (runModeEntry intercepts that before delegating).  Its whole job is to reflect, to stderr, that a
+// `run` / `worker` was issued for a pipeline that has no real body yet: report the mode plus the
+// (already parsed) model / device it was given, as a supervisor would log it (stdout stays reserved
+// for the future result / protocol channel), and exit 0.  The real per-pipeline body (load + a
+// one-shot / worker loop) lands per pipeline later; nothing here touches OpenVINO.
+// It lives here in commands.cpp (not in pipeline_support.cpp) -- it is front-end infrastructure, so
+// the front-end's real --help (subcommandHelp) it used to mirror stays the single source of truth in
+// THE front-end, and the registry in pipeline_support.cpp merely references commands::runPipelineStub
+// for the eleven stub pipelines.  Declared (external linkage), not in the anonymous namespace, so the
+// registry in another translation unit can reach it.
+int runPipelineStub(const std::string& name,
+                    const PipelineParsed& parsed,
+                    bool worker) {
+  // A supervisor's line -- the pipeline + the form so a run is provably *not* reported as the other.
+  // It uses the (already parsed) model / device; the load set is a contract runModeEntry enforced
+  // -- and reported -- up-front, before routing, so nothing to re-check here.  stdout stays reserved
+  // for the result / protocol channel.
+  std::fprintf(stderr,
+               "ovgenai: %s%s: not yet implemented (this build is infrastructure only); "
+               "would %s model '%s' on '%s'\n",
+               name.c_str(),
+               worker ? " (worker mode)" : " (one-shot)",
+               worker ? "run it as a worker for" : "run a one-shot for",
+               parsed.model.c_str(), parsed.device.c_str());
+  return 0;
+}
+
 
 // Build the table: the two operator-facing forms -- run (one-shot) and worker
 // (long-lived), each routing by the --pipeline value to an unchanged pipeline body --

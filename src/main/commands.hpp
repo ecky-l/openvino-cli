@@ -40,16 +40,25 @@
 #include <vector>
 
 namespace ovgenai {
+  // Forward-declared (fully defined in pipeline_support.hpp): the PARSED arguments a pipeline body
+  // receives.  runModeEntry parses the command line ONCE (the general argument parsing lives in the
+  // front-end, not in the bodies) and hands one of these in -- so a body neither re-parses the argv
+  // nor needs it.  Forward-declared here (not #included) because this header only uses the type as a
+  // `const&` parameter (runPipelineStub below); the full definition comes via pipeline_support.hpp.
+  struct PipelineParsed;
+
 namespace commands {
 
 // One CLI subcommand entry.
 //   name        -- the token the operator types: "run" / "worker" / "show-config"
 //   category    -- "command" (run / worker) or "helper" (show-config)
 //   description -- the blurb boost (the index, hand-laid) puts in the `--help` column
-//   run         -- the behaviour; receives the program name (argv[0], for usage text)
-//                  and the *full* argv tail (the subcommand token at index 0, its own
-//                  options/positional after -- the same shape `runPipelineStub` /
-//                  `runVlm` consume, which each drop index 0 for their own args).
+//   run         -- the behaviour; receives the program name (argv[0], for usage text) and the
+//                  *full* argv tail (the subcommand token at index 0, then its options / a
+//                  positional model).  The two real subcommands (run / worker) bind it to
+//                  runModeEntry, which parses the command line ONCE and hands the selected body
+//                  (a PipelineBinding, e.g. vlm's runVlmBody in pipeline_support.cpp) a
+//                  PipelineParsed -- so the bodies no longer take / parse the argv at all.
 struct Subcommand {
   std::string name;
   std::string category;
@@ -80,9 +89,20 @@ const std::vector<std::string>& pipelineNames();
 // The `--pipeline`/`-p` option's description: a single line pointing the operator at the
 // `show-pipelines` helper, which lists every pipeline with a one-line explanation (the
 // full table no longer inlines in this --help).  Shared by the `run`/`worker` help --
-// and reused verbatim by vlm.cpp for its in-body `--pipeline` flag, so the body's parse
-// stays consistent with the help.
+// and reused by pipeline_support.cpp for its in-body `--pipeline` flag, so the body's
+// parse stays consistent with the help.
 std::string pipelineParamDesc();
+
+// The infrastructure-only body shared by every not-yet-implemented pipeline (the rub the registry
+// binds to the eleven pipelines with no real body yet): it NO LONGER parses the command line --
+// runModeEntry parses it ONCE and hands the body a ready PipelineParsed -- so the stub just
+// reflects, to stderr, the (already reported) route + the mode + the (already parsed) model / device
+// it was given, as a supervisor would log it (stdout is reserved for the result / protocol channel),
+// and exits 0.  It lives here -- not in pipeline_support.cpp -- so the stub and the real bodies
+// share ONE help renderer; pipeline_support.cpp's registry calls it for the stubs.  Declared
+// (external linkage), not in an anonymous namespace, precisely so the registry in another
+// translation unit can reach it.
+int runPipelineStub(const std::string& name, const PipelineParsed& parsed, bool worker);
 
 // The front-end: the registry, the argv dispatch, and the `--help` index.
 class SubcommandTable {
